@@ -250,4 +250,3 @@ for flag in result.queue("INVESTIGATE"):
 
 MIT
 
-*Invented by [Teerth Sharma](https://teerthsharma.vercel.app)*
