@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: parakh
+      POSTGRES_PASSWORD: parakh_dev
+      POSTGRES_DB: parakh
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://parakh:parakh_dev@postgres:5432/parakh
+
+volumes:
+  postgres_data:
