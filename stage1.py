@@ -212,12 +212,12 @@ class Validator:
         spent = _parse_amount(record.get("amount_spent"))
         if sanction is None:
             errors.append("invalid amount: sanction_amount")
-        elif sanction < 0 or not math.isfinite(sanction):
-            errors.append("invalid amount: sanction_amount must be finite and >= 0")
+        elif sanction <= 0 or not math.isfinite(sanction):
+            errors.append("invalid amount: sanction_amount must be finite and > 0")
         if spent is None:
             errors.append("invalid amount: amount_spent")
-        elif spent < 0 or not math.isfinite(spent):
-            errors.append("invalid amount: amount_spent must be finite and >= 0")
+        elif spent <= 0 or not math.isfinite(spent):
+            errors.append("invalid amount: amount_spent must be finite and > 0")
         if sanction is not None and spent is not None:
             if spent > sanction * 1.25:
                 errors.append("financial inconsistency: amount_spent exceeds sanction_amount by >25%")
@@ -340,6 +340,8 @@ def generate_data(n: int = 10_000, seed: int = 42) -> List[Dict[str, Any]]:
         if category == "anomalous" and rng.random() < 0.35:
             district, month = rng.choice(burst_district_months)
             state = states[district]
+            if district in dominant_vendors and rng.random() < 0.85:
+                vendor = rng.choice(dominant_vendors[district])
         proposal = datetime(year, month, rng.randint(1, 25))
         approval = proposal + timedelta(days=rng.randint(7, 120))
         completion = approval + timedelta(days=rng.randint(30, 540))
@@ -398,6 +400,8 @@ def build_corpus(cleaned: List[CleanRecord], validated: List[ValidationResult], 
                 missing_counts[field_name] += 1
     error_counts = Counter(error for result in validated for error in result.errors)
     warning_counts = Counter(warning for result in validated for warning in result.warnings)
+    work_id_counts = Counter(record.work_id for record in cleaned if record.work_id is not None)
+    duplicate_work_ids = sorted(work_id for work_id, count in work_id_counts.items() if count > 1)
     summary = {
         "total_records": total,
         "valid_records": total - invalid,
@@ -406,6 +410,8 @@ def build_corpus(cleaned: List[CleanRecord], validated: List[ValidationResult], 
         "missing_fields_pct": {k: round((100.0 * v / total) if total else 0.0, 4) for k, v in missing_counts.items()},
         "category_distribution": dict(Counter(record.record_category for record in cleaned)),
         "status_distribution": dict(Counter(record.status for record in cleaned)),
+        "duplicate_work_id_count": len(duplicate_work_ids),
+        "duplicate_work_ids": duplicate_work_ids[:20],
         "error_counts": dict(error_counts),
         "warning_counts": dict(warning_counts),
     }

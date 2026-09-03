@@ -1,20 +1,20 @@
 {
   "total_records": 10000,
-  "valid_records": 8464,
-  "invalid_records": 1536,
-  "invalid_pct": 15.36,
+  "valid_records": 8490,
+  "invalid_records": 1510,
+  "invalid_pct": 15.1,
   "missing_fields_pct": {
     "work_id": 0.0,
-    "work_name": 1.86,
-    "district": 1.61,
+    "work_name": 1.59,
+    "district": 1.78,
     "state": 0.0,
-    "sanction_amount": 1.9,
-    "amount_spent": 1.58,
+    "sanction_amount": 1.74,
+    "amount_spent": 1.65,
     "date_proposal": 0.0,
     "date_approval": 1.97,
-    "date_completion": 1.49,
-    "implementing_agency": 2.08,
-    "vendor_name": 1.72,
+    "date_completion": 1.89,
+    "implementing_agency": 1.78,
+    "vendor_name": 1.55,
     "status": 0.0
   },
   "category_distribution": {
@@ -23,28 +23,30 @@
     "anomalous": 1000
   },
   "status_distribution": {
-    "approved": 2490,
-    "completed": 6512,
+    "approved": 2599,
+    "completed": 6403,
     "proposed": 998
   },
+  "duplicate_work_id_count": 0,
+  "duplicate_work_ids": [],
   "error_counts": {
     "missing field: date_approval": 197,
     "invalid date: date_approval": 197,
-    "missing field: work_name": 186,
-    "missing field: district": 161,
-    "missing field: amount_spent": 158,
-    "invalid amount: amount_spent": 158,
-    "missing field: sanction_amount": 190,
-    "invalid amount: sanction_amount": 190,
-    "missing field: date_completion": 149,
-    "invalid date: date_completion": 149,
-    "financial inconsistency: amount_spent exceeds sanction_amount by >25%": 134,
-    "missing field: vendor_name": 172,
-    "missing field: implementing_agency": 208,
-    "date inconsistency: date_proposal after date_approval": 143,
-    "date inconsistency: date_approval after date_completion": 101
+    "missing field: work_name": 159,
+    "missing field: amount_spent": 165,
+    "invalid amount: amount_spent": 165,
+    "missing field: vendor_name": 155,
+    "date inconsistency: date_approval after date_completion": 106,
+    "missing field: implementing_agency": 178,
+    "missing field: sanction_amount": 174,
+    "invalid amount: sanction_amount": 174,
+    "missing field: district": 178,
+    "date inconsistency: date_proposal after date_approval": 139,
+    "missing field: date_completion": 189,
+    "financial inconsistency: amount_spent exceeds sanction_amount by >25%": 136,
+    "invalid date: date_completion": 189
   },
   "warning_counts": {
-    "financial warning: amount_spent exceeds sanction_amount": 878
+    "financial warning: amount_spent exceeds sanction_amount": 859
   }
 }
