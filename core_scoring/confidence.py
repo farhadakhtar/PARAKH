@@ -24,7 +24,11 @@ SOURCE_LAMBDA = 1.5
 
 
 def _present(value: Any) -> bool:
-    return value is not None and value != ""
+    if value is None or value == "":
+        return False
+    if isinstance(value, dict) and not value:
+        return False
+    return True
 
 
 def _sigmoid(value: float) -> float:

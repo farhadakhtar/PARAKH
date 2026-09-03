@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 class WorkRecord(BaseModel):
     mp_id: Optional[str] = None
     work_id: str
-    location: Optional[str] = None
+    location: Optional[Dict[str, Any]] = None
     payment_id: Optional[str] = None
     district_id: Optional[str] = None
     work_status: Optional[str] = None
