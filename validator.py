@@ -1,19 +1,5 @@
 """
-PARAfrom pathlib import Path
-
-# Base directory for all project data — determined at runtime from __file__
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-OUTPUT_DIR = BASE_DIR / "outputs"
-LOG_DIR = BASE_DIR / "logs"
-
-# Ensure directories exist
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-
-KH Stage 1 — Validation Engine
+PARAKH Stage 1 — Validation Engine
 
 Validates records and returns ValidationResult with is_valid, errors, and warnings.
 All violations are recorded; data is NEVER dropped.
@@ -22,7 +8,7 @@ All violations are recorded; data is NEVER dropped.
 from __future__ import annotations
 
 from typing import List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -31,8 +17,14 @@ class ValidationResult:
     """Result of record validation."""
 
     is_valid: bool
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
+    errors: List[str] = None
+    warnings: List[str] = None
+
+    def __post_init__(self):
+        if self.errors is None:
+            self.errors = []
+        if self.warnings is None:
+            self.warnings = []
 
 
 class Validator:

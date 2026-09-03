@@ -1,24 +1,10 @@
 """
-PARAKH Sfrom pathlib import Path
-
-# Base directory for all project data — determined at runtime from __file__
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-OUTPUT_DIR = BASE_DIR / "outputs"
-LOG_DIR = BASE_DIR / "logs"
-
-# Ensure directories exist
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-
-tage 1 — Cleaning and Normalization
+PARAKH Stage 1 — Cleaning and Normalization
 
 Cleans and normalizes records without silently imputing missing values.
 Rules:
 - Standardize text by lowercasing and trimming
-- Normalize vendor names using basic deduplication (remove punctuation, collapse whitespace)
+- Normalize vendor names using basic deduplication (remove punctuation)
 - Convert dates to consistent format (ISO 8601 YYYY-MM-DD)
 - Do NOT impute missing values silently
 """

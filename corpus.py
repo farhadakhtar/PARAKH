@@ -1,19 +1,5 @@
 """
-PARAfrom pathlib import Path
-
-# Base directory for all project data — determined at runtime from __file__
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-OUTPUT_DIR = BASE_DIR / "outputs"
-LOG_DIR = BASE_DIR / "logs"
-
-# Ensure directories exist
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-
-KH Stage 1 — Corpus Object
+PARAKH Stage 1 — Corpus Object
 
 Holds cleaned records, validation statistics, and distribution tracking.
 Stores ALL records including invalid ones — never drops data.
@@ -151,16 +137,6 @@ class Corpus:
             cat: (count / total) * 100.0
             for cat, count in self._category_distribution.items()
         }
-
-    def get_invalid_records(self) -> List[CleanRecord]:
-        """Return records that have validation errors.
-
-        Note: Corpus tracks validity via validation_summary, not per-record
-        is_valid flag, to keep CleanRecord lightweight.
-        """
-        # This is a proxy — actual invalid tracking comes from validation_summary
-        # In a full implementation, CleanRecord would have an is_valid attribute
-        return []
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize corpus state for debugging/monitoring."""
