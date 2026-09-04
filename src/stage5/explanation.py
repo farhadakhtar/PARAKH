@@ -175,12 +175,6 @@ def explain_risk(row: Mapping[str, Any]) -> str:
     quality_bits: List[str] = []
     if confidence is not None:
         quality_bits.append(f"confidence {confidence}")
-    deficit_factor = row.get("risk_deficit_factor")
-    if deficit_factor is not None and _fmt(deficit_factor) is not None:
-        if float(deficit_factor) < 0.999:
-            quality_bits.append(
-                f"critical fields missing (factor {_fmt(deficit_factor)})"
-            )
     floor = row.get("risk_component_floor")
     if floor is not None and _fmt(floor) is not None and float(floor) < 0.999:
         quality_bits.append(f"weakest Stage 2 component {_fmt(floor)}")
@@ -188,10 +182,18 @@ def explain_risk(row: Mapping[str, Any]) -> str:
         quality_bits.append("an impossible date ordering")
     if quality_bits:
         parts.append(
-            f"Data quality {quality} follows from " + ", ".join(quality_bits) + "."
+            f"Data quality {quality} is the lowest of " + ", ".join(quality_bits) + "."
         )
+    # `risk_deficit_factor` is deliberately NOT mentioned. It is reported as a
+    # column and in the calibration report, but the score does not use it, and
+    # naming an inactive factor in a narrative that claims to reconstruct the
+    # arithmetic would be a contradiction however carefully it were worded.
 
     # --- factor 3: how stable --------------------------------------------
+    #
+    # Only the two components that can be non-zero on a SCORED record are
+    # named. `no_severity` and `no_norm` are excluded by the gate before a
+    # score exists, so mentioning them here could only ever be false.
     unstable: List[str] = []
     if not bool(row.get("peer_cell_stable", True)):
         unstable.append("its peer cell is too small to rely on")

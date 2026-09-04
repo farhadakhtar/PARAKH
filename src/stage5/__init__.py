@@ -14,6 +14,7 @@ Public surface:
 
 from src.stage5.calibration import (
     COMPONENT_COLUMNS,
+    compute_contribution_analysis,
     compute_stage5_calibration_report,
 )
 from src.stage5.components import (
@@ -71,6 +72,7 @@ __all__ = [
     "compute_data_quality",
     "compute_risk",
     "compute_signal_strength",
+    "compute_contribution_analysis",
     "compute_stage5_calibration_report",
     "compute_uncertainty",
     "explain_risk",

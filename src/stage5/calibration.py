@@ -19,12 +19,15 @@ import pandas as pd
 from src.core.constants import (
     ANOMALY_TYPES,
     CALIBRATION_QUANTILES,
+    CALIBRATION_STATUS_BANNER,
+    CONTRIBUTION_FLAG_THRESHOLD_PCT,
     MIN_CONFIDENCE_FOR_RISK,
     R_HIGH,
     R_LOW,
     RISK_FLAGS,
-    RISK_UNDEFINED_REASONS,
+    RISK_NOT_A_THRESHOLD_NOTE,
     STAGE5_VERSION,
+    UNCERTAINTY_COMPONENT_CLASS,
 )
 from src.core.logger import get_logger
 from src.stage4.calibration import describe_defined
@@ -55,6 +58,142 @@ def _spearman(left: pd.Series, right: pd.Series) -> Optional[float]:
     return round(float(value), 6) if pd.notna(value) else None
 
 
+def compute_contribution_analysis(
+    frame: pd.DataFrame, flag_threshold: float = CONTRIBUTION_FLAG_THRESHOLD_PCT
+) -> Dict[str, Any]:
+    """Attribute the score's spread to its three factors.
+
+    In log space the product becomes a sum, so ``log risk = log S + log Q +
+    log(1-U)`` and the factors can be attributed properly. Two measures are
+    reported, because they answer different questions and can disagree sharply:
+
+    * **variance share** - each factor's own variance over the total. Ignores
+      covariance, so it understates a factor that moves together with the
+      others.
+    * **covariance share** - ``cov(x, log risk) / var(log risk)``. These sum to
+      exactly 100% by the bilinearity of covariance, and this is the honest
+      attribution of the spread actually observed.
+
+    On the reference corpus the stability factor reads 0.92% by variance share
+    and 1.75% by covariance share. Neither number is a reason to remove it: a
+    small contribution to spread is not the same as no effect on decisions, and
+    the decisive test is whether dropping the factor changes a band. It changes
+    294 of them.
+
+    Args:
+        frame: A frame carrying the Stage 5 score and its three components.
+        flag_threshold: Percentage below which a factor is flagged for review.
+
+    Returns:
+        A JSON-serialisable attribution, or a note if the columns are absent.
+    """
+    needed = ("risk_score", *COMPONENT_COLUMNS)
+    if any(name not in frame.columns for name in needed):
+        return {"unavailable": "Stage 5 components are not present"}
+
+    defined = frame["risk_defined"].to_numpy(dtype=bool)
+    if int(defined.sum()) < 3:
+        return {"unavailable": "too few scored records to attribute"}
+
+    raw = {
+        "signal_strength": frame.loc[defined, "risk_signal_strength"].to_numpy(
+            dtype="float64"
+        ),
+        "data_quality": frame.loc[defined, "risk_data_quality"].to_numpy(
+            dtype="float64"
+        ),
+        "stability": 1.0
+        - frame.loc[defined, "risk_uncertainty"].to_numpy(dtype="float64"),
+    }
+
+    # A factor of exactly 0 has no logarithm, and clipping it to a floor breaks
+    # the identity the whole attribution rests on: log risk would no longer
+    # equal the sum of the component logs, and the shares would not sum to
+    # 100%. Such records are excluded and counted rather than approximated.
+    positive = np.ones(int(defined.sum()), dtype=bool)
+    for values in raw.values():
+        positive &= values > 0.0
+    n_excluded = int((~positive).sum())
+    if int(positive.sum()) < 3:
+        return {
+            "unavailable": "too few strictly positive records to attribute",
+            "n_excluded_zero_factor": n_excluded,
+        }
+
+    factors = {name: np.log(values[positive]) for name, values in raw.items()}
+    # The target is the SUM of the component logs, which is exactly log risk
+    # wherever every factor is positive. Using it directly makes the shares sum
+    # to 100% by the bilinearity of covariance, with no residual to explain.
+    log_risk = sum(factors.values())
+    risk_variance = float(np.var(log_risk))
+    total_variance = float(sum(np.var(values) for values in factors.values()))
+    if total_variance <= 0.0 or risk_variance <= 0.0:
+        return {"unavailable": "no variance to attribute"}
+
+    analysis: Dict[str, Any] = {
+        "_method": (
+            "log-space attribution; the product is a sum there. Covariance "
+            "share is the honest one and sums to 100%."
+        ),
+        "_flag_threshold_pct": flag_threshold,
+        "n_scored": int(defined.sum()),
+        "n_attributed": int(positive.sum()),
+        "n_excluded_zero_factor": n_excluded,
+        "factors": {},
+        "flagged": [],
+    }
+    for name, values in factors.items():
+        variance_share = (
+            100.0 * float(np.var(values)) / total_variance if total_variance > 0 else 0.0
+        )
+        # ddof=0 to match np.var above. numpy's cov defaults to ddof=1, and
+        # mixing the two scales every share by n/(n-1) - enough to break the
+        # sum-to-100% identity that makes this attribution trustworthy.
+        covariance_share = (
+            100.0 * float(np.cov(values, log_risk, ddof=0)[0, 1]) / risk_variance
+            if risk_variance > 0
+            else 0.0
+        )
+        analysis["factors"][name] = {
+            "variance_share_pct": round(variance_share, 4),
+            "covariance_share_pct": round(covariance_share, 4),
+        }
+        if covariance_share < flag_threshold:
+            analysis["flagged"].append(name)
+
+    if analysis["flagged"]:
+        analysis["_flag_note"] = (
+            f"{analysis['flagged']} contribute below {flag_threshold}% of the "
+            "score's spread. FLAGGED FOR REVIEW, NOT FOR REMOVAL: a factor can "
+            "move few records far. Removal requires proving no decision changes."
+        )
+
+    # The decisive test the flag alone cannot answer.
+    without_stability = (
+        frame.loc[defined, "risk_signal_strength"].to_numpy(dtype="float64")
+        * frame.loc[defined, "risk_data_quality"].to_numpy(dtype="float64")
+    )
+    actual = frame.loc[defined, "risk_score"].to_numpy(dtype="float64")
+
+    def _band(values: np.ndarray) -> np.ndarray:
+        return np.where(
+            values >= R_HIGH, "high", np.where(values >= R_LOW, "moderate", "low")
+        )
+
+    changed = int((_band(actual) != _band(without_stability)).sum())
+    analysis["stability_removal_test"] = {
+        "_note": (
+            "What would happen if the stability factor were dropped from the "
+            "product. This, not the variance share, is what decides whether it "
+            "is dead logic."
+        ),
+        "bands_changed": changed,
+        "bands_changed_pct": round(100.0 * changed / max(int(defined.sum()), 1), 4),
+        "verdict": "load-bearing" if changed else "redundant",
+    }
+    return analysis
+
+
 def compute_stage5_calibration_report(
     frame: pd.DataFrame, quantiles: Sequence[float] = CALIBRATION_QUANTILES
 ) -> Dict[str, Any]:
@@ -72,6 +211,7 @@ def compute_stage5_calibration_report(
         return {
             "stage5_version": STAGE5_VERSION,
             "n_records": total,
+            "_status": CALIBRATION_STATUS_BANNER,
             "unavailable": "Stage 5 has not been attached",
         }
 
@@ -81,6 +221,7 @@ def compute_stage5_calibration_report(
     report: Dict[str, Any] = {
         "stage5_version": STAGE5_VERSION,
         "n_records": total,
+        "_status": CALIBRATION_STATUS_BANNER,
         "_note": (
             "Descriptive only. No value here is or becomes a threshold. R_HIGH "
             "and R_LOW are judgements fixed before this was measured; if they "
@@ -93,7 +234,10 @@ def compute_stage5_calibration_report(
             "min_confidence_for_risk": MIN_CONFIDENCE_FOR_RISK,
             "_status": "judgements, not estimates - none is fitted to data",
         },
-        "risk_score": describe_defined(score, quantiles),
+        "risk_score": {
+            **describe_defined(score, quantiles),
+            "_not_a_threshold": RISK_NOT_A_THRESHOLD_NOTE,
+        },
         "undefined": {
             "count": int((~defined).sum()),
             "pct": round(100.0 * float((~defined).mean()), 4) if total else 0.0,
@@ -169,6 +313,51 @@ def compute_stage5_calibration_report(
             else None,
             "n_compared": int(len(positive)),
         }
+
+    # --- AUDIT TASK 4: which uncertainty terms actually do anything -------
+    #
+    # Reported on the SCORED subset specifically, because a term that fires
+    # often across the corpus can still be structurally dead inside the score:
+    # the gate excludes exactly the records that would have triggered it.
+    scored = frame.loc[defined]
+    contributions = {
+        "no_severity": "severity_defined",
+        "no_norm": "cluster_has_norm",
+        "unstable_cell": "peer_cell_stable",
+    }
+    liveness: Dict[str, Any] = {
+        "_note": (
+            "A term firing 0% on the scored subset is redundant with the gate, "
+            "not merely rare. It is retained as an invariant guard and its "
+            "deadness is published rather than assumed."
+        )
+    }
+    for name, column in contributions.items():
+        if column in frame.columns:
+            fired = ~frame[column].fillna(False).to_numpy(dtype=bool)
+            fired_scored = (
+                ~scored[column].fillna(False).to_numpy(dtype=bool)
+                if len(scored)
+                else np.zeros(0, dtype=bool)
+            )
+            liveness[name] = {
+                "records_affected": int(fired.sum()),
+                "corpus_pct": round(100.0 * float(fired.mean()), 4) if total else 0.0,
+                "records_affected_scored": int(fired_scored.sum()),
+                "scored_pct": round(100.0 * float(fired_scored.mean()), 4)
+                if len(scored)
+                else 0.0,
+                "dead_in_score": bool(len(scored) and not fired_scored.any()),
+                "class": UNCERTAINTY_COMPONENT_CLASS.get(name, "unknown"),
+            }
+    if "risk_uncertainty" in frame.columns and len(scored):
+        liveness["uncertainty_range_on_scored"] = {
+            "min": round(float(scored["risk_uncertainty"].min()), 6),
+            "max": round(float(scored["risk_uncertainty"].max()), 6),
+        }
+    liveness["_classification"] = dict(UNCERTAINTY_COMPONENT_CLASS)
+    report["uncertainty_liveness"] = liveness
+    report["contribution_analysis"] = compute_contribution_analysis(frame)
 
     # --- per anomaly type --------------------------------------------------
     breakdown: Dict[str, Any] = {}

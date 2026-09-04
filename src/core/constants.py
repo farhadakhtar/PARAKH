@@ -1274,3 +1274,188 @@ RISK_FLAGS: Final[tuple[str, ...]] = (
 
 STAGE5_RISK_REPORT: Final[str] = "stage5_risk_report.json"
 STAGE5_CALIBRATION_REPORT: Final[str] = "stage5_calibration.json"
+
+
+#: Printed on every Stage 5 report. Removing it is a deliberate act that should
+#: require validating the layer against real outcomes first.
+CALIBRATION_STATUS_BANNER: Final[str] = (
+    "UNFIT FOR PRODUCTION - NOT CALIBRATED. Every threshold and weight in Stage 5 is a stated judgement; none has been fitted to, or validated against, real outcomes. The system has only ever been run on synthetic data with injected defects, so no number here estimates a real-world rate of anything."
+)
+
+
+#: How each uncertainty component behaves INSIDE the score, established by
+#: measurement (Stage 5 hardening) rather than by assumption.
+#:
+#: * ``active`` - fires on records that receive a score, and changes them.
+#: * ``gate_redundant`` - can only fire on records the gate has already
+#:   excluded. Retained because the uncertainty column is reported for EVERY
+#:   record, scored or not, and there it is the whole answer.
+#: * ``structurally_impossible`` - cannot fire while the upstream stages agree.
+#:   Retained as an invariant guard: if it ever fires, Stage 3 and Stage 4 have
+#:   diverged and the risk layer must say so rather than absorb it.
+UNCERTAINTY_COMPONENT_CLASS: Final[dict[str, str]] = {
+    "no_severity": "gate_redundant",
+    "no_norm": "gate_redundant",
+    "unstable_cell": "active",
+    "coverage": "active",
+    "unreachable_duplicate": "structurally_impossible",
+}
+
+#: A component contributing below this share of the score's log-variance is
+#: FLAGGED in the calibration report. A flag is a prompt to examine, never an
+#: instruction to remove: the decisive test for removal is whether dropping the
+#: component changes any decision, not whether its variance is small.
+CONTRIBUTION_FLAG_THRESHOLD_PCT: Final[float] = 1.0
+
+#: Printed beside every risk distribution.
+RISK_NOT_A_THRESHOLD_NOTE: Final[str] = (
+    "Risk values are NOT calibrated thresholds. A risk of 0.5 does not mean a "
+    "50% chance of anything; it is a position on an uncalibrated ordinal scale "
+    "produced by this corpus and these judgements."
+)
+
+
+# ===========================================================================
+# Stage 6 - Action & Routing Layer
+#
+# POLICY, not intelligence. Stage 6 computes nothing: it maps the Stage 4
+# decision and the Stage 5 risk band onto an action, a priority and a queue,
+# and writes a sentence a human can act on. Every table below is a policy
+# choice that an operations lead should be able to change without a developer.
+# ===========================================================================
+
+STAGE6_VERSION: Final[str] = "stage6.routing.v1"
+
+#: The five actions. Ordered most to least urgent.
+ACTION_CLASSES: Final[tuple[str, ...]] = (
+    "ESCALATE_IMMEDIATE",
+    "ESCALATE_REVIEW",
+    "DATA_QUALITY_REVIEW",
+    "REQUEST_CORRECTION",
+    "PASSIVE_MONITOR",
+)
+
+#: Priorities, most urgent first.
+PRIORITY_LEVELS: Final[tuple[str, ...]] = ("P0", "P1", "P2", "P3")
+
+#: Action -> priority. Fixed by the Stage 6 policy table.
+ACTION_TO_PRIORITY: Final[dict[str, str]] = {
+    "ESCALATE_IMMEDIATE": "P0",
+    "ESCALATE_REVIEW": "P1",
+    "DATA_QUALITY_REVIEW": "P1",
+    "REQUEST_CORRECTION": "P2",
+    "PASSIVE_MONITOR": "P3",
+}
+
+#: Action -> the team that owns the work.
+ACTION_TO_QUEUE: Final[dict[str, str]] = {
+    "ESCALATE_IMMEDIATE": "fraud_investigation_team",
+    "ESCALATE_REVIEW": "audit_team",
+    "REQUEST_CORRECTION": "field_officer",
+    "PASSIVE_MONITOR": "automated_monitoring",
+    "DATA_QUALITY_REVIEW": "data_quality_team",
+}
+
+REVIEWER_QUEUES: Final[tuple[str, ...]] = tuple(
+    sorted(set(ACTION_TO_QUEUE.values()))
+)
+
+#: Actions that put a record in front of an investigator. Invariant 6 applies
+#: to exactly these: an escalated record must carry at least one finding.
+ESCALATING_ACTIONS: Final[tuple[str, ...]] = (
+    "ESCALATE_IMMEDIATE",
+    "ESCALATE_REVIEW",
+)
+
+#: The M1 correction label. Stage 4 gates `underspend_anomaly` on lifecycle, so
+#: a large underspend on a work that is not yet complete escalates while
+#: carrying no named finding. That is a labelling gap, not a new signal: the
+#: deviation was already measured, already scored and already escalated
+#: upstream. This label states plainly that something drove the escalation
+#: which Stage 4 declined to name.
+M1_CORRECTION_LABEL: Final[str] = "unexplained_deviation"
+
+STAGE6_ACTION_REPORT: Final[str] = "stage6_action_report.json"
+
+
+# ===========================================================================
+# Stage 6 hardening - contract alignment and self-validation
+#
+# Nothing here changes a routing decision. Every entry either exposes an
+# existing decision under a second name, or states an assumption that was
+# previously being trusted in silence.
+# ===========================================================================
+
+#: The action vocabulary named in the Stage 6 audit specification.
+#:
+#: THREE vocabularies exist for this layer, and they do not agree:
+#:
+#: 1. ``Stage6.md`` (the PRD): INVESTIGATE / REMEDIATE / MONITOR / CLEAR.
+#:    Those are *decision* names, and Stage 4 already implements them as
+#:    DECISION_CLASSES (with INSUFFICIENT_CONTEXT in place of CLEAR).
+#: 2. The Stage 6 build brief: :data:`ACTION_CLASSES`, which is what this
+#:    system emits and what every downstream test binds to.
+#: 3. The Stage 6 audit specification: the names below.
+#:
+#: The as-built names are authoritative because they are what the pipeline
+#: produces; these are provided as an ALIAS so a consumer written against the
+#: audit specification resolves. No routing logic reads them.
+SPEC_ACTION_CLASSES: Final[tuple[str, ...]] = (
+    # --- currently produced by SPEC_ACTION_ALIAS -------------------------
+    "INVESTIGATE",
+    "ROUTE_AUDIT",
+    "REMEDIATE",
+    "MONITOR",
+    # --- named by a specification but never produced ---------------------
+    "ESCALATE_INVESTIGATION",
+    "ESCALATE_REVIEW",
+    "ROUTE_REMEDIATE",
+    "MONITOR_PASSIVE",
+    "HOLD_NO_ACTION",
+)
+
+#: As-built action -> the closest specification name.
+#:
+#: ``DATA_QUALITY_REVIEW -> ROUTE_AUDIT`` is the weakest of the five: the
+#: specification offers no data-quality action, and ROUTE_AUDIT is the nearest
+#: remaining sense of "a team must look at this record before it can be
+#: judged". Stated here rather than buried so the imprecision is visible.
+#:
+#: ``HOLD_NO_ACTION`` has no producer. Stage 6 never concludes that a record
+#: needs nothing: the quietest outcome it emits is PASSIVE_MONITOR, which is a
+#: standing watch rather than a dismissal. Representable, never emitted, and
+#: that is a deliberate property of the policy, not an omission.
+#: SUPERSEDED MAPPING. An earlier specification asked for a one-to-one
+#: rename into ESCALATE_INVESTIGATION / ROUTE_REMEDIATE / MONITOR_PASSIVE.
+#: Kept only so the change is traceable; nothing reads it.
+SPEC_ACTION_ALIAS_V1: Final[dict[str, str]] = {
+    "ESCALATE_IMMEDIATE": "ESCALATE_INVESTIGATION",
+    "ESCALATE_REVIEW": "ESCALATE_REVIEW",
+    "REQUEST_CORRECTION": "ROUTE_REMEDIATE",
+    "DATA_QUALITY_REVIEW": "ROUTE_AUDIT",
+    "PASSIVE_MONITOR": "MONITOR_PASSIVE",
+}
+
+#: As-built action -> the specification vocabulary, as currently mandated.
+#:
+#: **This mapping is deliberately NOT injective.** Both escalating actions
+#: collapse to ``INVESTIGATE``, so ``action_spec`` alone cannot distinguish a
+#: P0 fraud referral from a P1 audit review - 291 records from 128. That
+#: distinction survives in ``action_class`` and ``priority_level``, which are
+#: unchanged, and a consumer that needs it must read one of those. Recorded
+#: here because a lossy alias is a real cost, not a detail.
+SPEC_ACTION_ALIAS: Final[dict[str, str]] = {
+    "ESCALATE_IMMEDIATE": "INVESTIGATE",
+    "ESCALATE_REVIEW": "INVESTIGATE",
+    "DATA_QUALITY_REVIEW": "ROUTE_AUDIT",
+    "REQUEST_CORRECTION": "REMEDIATE",
+    "PASSIVE_MONITOR": "MONITOR",
+}
+
+#: Specification column name -> the as-built column it aliases. Pure renames:
+#: both columns carry identical values, verified by assertion on every run.
+SPEC_COLUMN_ALIAS: Final[dict[str, str]] = {
+    "action": "action_class",
+    "priority": "priority_level",
+    "action_reason": "action_rule",
+}

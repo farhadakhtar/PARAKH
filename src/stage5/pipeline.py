@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.constants import (
+    CALIBRATION_STATUS_BANNER,
     MIN_CONFIDENCE_FOR_RISK,
     R_HIGH,
     R_LOW,
@@ -183,6 +184,7 @@ class Stage5Result:
         return {
             "stage5_version": STAGE5_VERSION,
             "n_records": len(self.frame),
+            "_status": CALIBRATION_STATUS_BANNER,
             "_note": (
                 "Risk is an estimate under uncertainty. NO record is labelled "
                 "fraud. Bands are descriptive; Stage 6 owns routing. An "

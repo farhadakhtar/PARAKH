@@ -338,31 +338,42 @@ def compute_data_quality(
 ) -> DataQuality:
     """Compose how far the record's own evidence can be trusted.
 
-    ``confidence`` is the base, multiplied by three modifiers::
+    A **minimum**, not a product::
 
-        quality = confidence
-                  * min(defined Stage 2 components)     non-compensatory floor
-                  * exp(-k * critical_deficit)          missing critical fields
-                  * cluster_penalty_factor              Stage 2's own penalty
+        quality = min(confidence, completeness, temporal, reconciliation)
 
-    then floored at ``hard_fail_quality`` where the dates are internally
-    impossible, and multiplied by ``low_confidence_penalty`` below the gate.
+    over the components Stage 2 could actually measure, then capped at
+    ``hard_fail_quality`` where the dates are internally impossible, and
+    multiplied by ``low_confidence_penalty`` below the gate.
 
-    The component floor is a minimum rather than a mean on purpose: Stage 2's
-    whole philosophy is that a zero component dominates, and averaging would let
-    a perfect completeness score paper over a broken reconciliation.
+    Why a minimum (AUDIT FIX)
+    -------------------------
+    The first version multiplied ``confidence`` by the component floor, by
+    ``exp(-k * critical_deficit)`` and by ``cluster_penalty_factor``. All three
+    of those are *already inside* Stage 2's confidence - ``critical_deficit``
+    and ``cluster_penalty_factor`` are inputs to ``C_comp``, and the three
+    component scores are the very terms confidence aggregates. Multiplying them
+    back in charged every record two to four times for one defect, suppressing
+    the median quality by **34.3%** and, worse, making risk correlate more
+    strongly with confidence (0.684) than with severity (0.630) - the ordering
+    this layer exists to get right.
 
-    **Known double count, accepted.** ``cluster_penalty_factor`` and
-    ``critical_deficit`` are both already reflected inside Stage 2's
-    ``completeness``, so applying them again charges the same defect twice. The
-    design names all three as inputs, and the direction is conservative - it
-    lowers risk on poor records, never raises it - so it is applied as specified
-    and stated here rather than silently dropped.
+    The minimum fixes it structurally rather than by reweighting: ``min`` is
+    **idempotent**, so a quantity that appears twice contributes exactly once.
+    It is also strictly non-compensatory, which is the property the product was
+    reached for in the first place - a perfect completeness still cannot paper
+    over a broken reconciliation.
+
+    ``critical_deficit`` and ``cluster_penalty_factor`` are no longer applied.
+    They remain **reported** (``risk_deficit_factor``) as diagnostics, because
+    removing a column would break the contract and because a reader auditing a
+    low quality score still wants to see them.
 
     Args:
         frame: Corpus frame with the Stage 2 breakdown.
         min_confidence: The gate below which the extra penalty applies.
-        deficit_decay: ``k`` in the exponential decay on critical deficit.
+        deficit_decay: ``k`` for the REPORTED ``risk_deficit_factor``. No longer
+            applied to the score; see the note above.
         hard_fail_quality: Ceiling under an impossible date ordering.
         low_confidence_penalty: Multiplier below the gate.
 
@@ -397,12 +408,13 @@ def compute_data_quality(
     # and `confidence` alone carries the term. Stage 2 already priced this.
     floor = np.where(any_defined, floor, 1.0)
 
+    # Reported, NOT applied. Both quantities already sit inside Stage 2's
+    # completeness; re-applying them was the double count this audit removed.
     deficit = np.maximum(_column(frame, "critical_deficit", 0.0), 0.0)
     deficit_factor = np.exp(-float(deficit_decay) * deficit)
 
-    penalty = np.clip(_column(frame, "cluster_penalty_factor", 1.0), 0.0, 1.0)
-
-    quality = confidence * floor * deficit_factor * penalty
+    # min, not product: idempotent, so a quantity counted twice counts once.
+    quality = np.minimum(confidence, floor)
 
     hard_fail = _bool_column(frame, "temporal_hard_fail")
     quality = np.where(hard_fail, np.minimum(quality, hard_fail_quality), quality)
@@ -432,9 +444,11 @@ def compute_data_quality(
             "n_below_gate": int(below_gate.sum()),
             "n_temporal_hard_fail": int(hard_fail.sum()),
             "deficit_decay": float(deficit_decay),
-            "_double_count": (
-                "critical_deficit and cluster_penalty_factor are also inside "
-                "Stage 2 completeness; applied per the design, conservative"
+            "_composition": "min(confidence, defined Stage 2 components)",
+            "_double_count_removed": (
+                "critical_deficit and cluster_penalty_factor are inside Stage 2 "
+                "completeness and are no longer re-applied; min is idempotent so "
+                "the remaining terms cannot double count either"
             ),
         },
     )
@@ -562,6 +576,21 @@ def compute_uncertainty(
         diagnostics={
             "n_unreachable_duplicate": n_unreachable,
             "duplicate_reachability_measured": "duplicate_reachable" in frame.columns,
+            # AUDIT TASK 4: three of these five can never fire on a record that
+            # RECEIVES a risk score, because the gate already excludes exactly
+            # those records. They are alive in the reported column - which
+            # covers every record, scored or not - and dead in the score. Both
+            # facts are published rather than either being assumed.
+            "firing_rate_pct": {
+                name: round(
+                    100.0 * float((contributions[name].to_numpy() > 0).mean()), 4
+                )
+                for name in contributions.columns
+            }
+            if len(index)
+            else {},
+            "_gate_redundant": ["no_severity", "no_norm"],
+            "_provably_empty": ["unreachable_duplicate"],
             "weights": {
                 "no_severity": no_severity,
                 "no_norm": no_norm,

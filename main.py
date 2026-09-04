@@ -51,6 +51,8 @@ from src.stage4.pipeline import (
     AnomalyLayer,
     attach_anomalies,
 )
+from src.stage5.pipeline import STAGE5_COLUMNS, attach_risk
+from src.stage6.pipeline import STAGE6_COLUMNS, attach_actions
 from src.utils.helpers import ensure_dir
 
 LOGGER = get_logger(__name__)
@@ -118,6 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop after Stage 3; skip anomaly interpretation.",
     )
     parser.add_argument(
+        "--stage4-only",
+        action="store_true",
+        help="Stop after Stage 4; skip risk scoring.",
+    )
+    parser.add_argument(
+        "--stage5-only",
+        action="store_true",
+        help="Stop after Stage 5; skip action routing.",
+    )
+    parser.add_argument(
         "--duplicate-diagnostics",
         action="store_true",
         help=(
@@ -159,6 +171,8 @@ def run(
     run_stage2: bool = True,
     run_stage3: bool = True,
     run_stage4: bool = True,
+    run_stage5: bool = True,
+    run_stage6: bool = True,
     duplicate_diagnostics: bool = False,
 ) -> Corpus:
     """Execute the Stage 1 pipeline and print its reports.
@@ -174,6 +188,8 @@ def run(
         run_stage2: Also score evidentiary confidence.
         run_stage3: Also build peer structure.
         run_stage4: Also interpret deviations into anomalies and decisions.
+        run_stage5: Also estimate risk conditional on data quality.
+        run_stage6: Also route records to actions, priorities and queues.
         duplicate_diagnostics: Also measure duplicate observability.
 
     Returns:
@@ -296,8 +312,188 @@ def run(
                     save=save,
                     duplicate_diagnostics=duplicate_diagnostics,
                 )
+                if run_stage5:
+                    _run_stage5(
+                        corpus,
+                        output_dir=output_dir,
+                        head_rows=head_rows,
+                        save=save,
+                    )
+                    if run_stage6:
+                        _run_stage6(
+                            corpus,
+                            output_dir=output_dir,
+                            head_rows=head_rows,
+                            save=save,
+                        )
 
     return corpus
+
+
+def _run_stage6(
+    corpus: Corpus, output_dir: Path, head_rows: int, save: bool
+) -> None:
+    """Route records to actions and print the Stage 6 reports.
+
+    Args:
+        corpus: A corpus already carrying Stage 4 and Stage 5 output.
+        output_dir: Where the Stage 6 report is written.
+        head_rows: How many records to preview.
+        save: When False, nothing is written to disk.
+    """
+    _banner("STAGE 6  ACTION & ROUTING")
+    result = attach_actions(corpus)
+    report = result.report()
+    records = corpus.records
+    routing = report["routing"]
+
+    print(
+        f"Routed {len(result):,} records in {result.elapsed_seconds:.2f}s; "
+        f"{len(STAGE6_COLUMNS)} contract columns. Nothing was recomputed."
+    )
+    print("  Policy, not inference. Escalation means a human should look -")
+    print("  it is not a finding of fraud.")
+
+    print("\n--- who does the work ---")
+    for queue, count in sorted(
+        routing["reviewer_queue"].items(), key=lambda item: -item[1]
+    ):
+        print(f"  {queue:<26} {count:>7,}  ({100.0 * count / max(len(result), 1):5.2f}%)")
+
+    print("\n--- how urgent ---")
+    for level in ("P0", "P1", "P2", "P3"):
+        count = routing["priority_level"][level]
+        print(f"  {level}  {count:>7,}  ({100.0 * count / max(len(result), 1):5.2f}%)")
+
+    print("\n--- which policy rule fired ---")
+    for rule, count in sorted(routing["rule_fired"].items(), key=lambda item: -item[1]):
+        print(f"  {rule:<26} {count:>7,}")
+
+    correction = routing["m1_correction"]
+    print("\n--- M1: escalations that carried no named finding ---")
+    print(
+        f"  {correction['n_corrected']:,} record(s) labelled"
+        f" '{correction['label']}' ({correction['pct']}%)"
+    )
+    print("  Stage 4's anomaly_types is unchanged; the label lives in a new column.")
+
+    print("\n--- worked examples ---")
+    for queue in ("fraud_investigation_team", "audit_team", "field_officer",
+                  "data_quality_team"):
+        pending = result.queue(queue)
+        if not len(pending):
+            continue
+        row = pending.index[0]
+        print(f"\n  [{queue}]  record {row}")
+        for line in str(records.loc[row, "explanation"]).split(chr(10)):
+            print(f"    {line}")
+
+    print("\n--- enriched records ---")
+    preview = ["action_class", "priority_level", "reviewer_queue", "action_rule"]
+    with pd.option_context("display.max_columns", None, "display.width", 200):
+        print(records[preview].head(head_rows).to_string())
+
+    if save:
+        ensure_dir(output_dir)
+        for name, path in result.save_reports(output_dir).items():
+            print(f"\n  {name:<20} -> {path}")
+    else:
+        print("\n  --no-save: nothing written.")
+
+
+def _run_stage5(
+    corpus: Corpus, output_dir: Path, head_rows: int, save: bool
+) -> None:
+    """Estimate risk conditional on evidence and print the Stage 5 reports.
+
+    Args:
+        corpus: A corpus already carrying Stage 2, 3 and 4 output.
+        output_dir: Where the Stage 5 reports are written.
+        head_rows: How many records to preview.
+        save: When False, nothing is written to disk.
+    """
+    _banner("STAGE 5  RISK SCORING UNDER UNCERTAINTY")
+    result = attach_risk(corpus)
+    report = result.report()
+    records = corpus.records
+
+    print(
+        f"Scored {len(result):,} records in {result.elapsed_seconds:.2f}s; "
+        f"{len(STAGE5_COLUMNS)} contract columns. Nothing was recomputed."
+    )
+    print("  NO record is labelled fraud. Risk is an estimate under uncertainty,")
+    print("  and bands are descriptive - Stage 6 owns routing.")
+
+    risk = report["risk"]
+    print("\n--- where a risk score exists, and where it cannot ---")
+    print(f"  defined for {risk['defined_pct']}% of records")
+    for name, count in sorted(risk["undefined_by_reason"].items()):
+        print(f"    {name:<26} {count:>7,}  no score, NOT a low score")
+
+    print("\n--- risk bands (descriptive, not decisions) ---")
+    for name in ("high_risk", "moderate_risk", "low_risk", "insufficient_data"):
+        count = risk["flags"][name]
+        print(f"  {name:<20} {count:>7,}  ({100.0 * count / max(len(result), 1):5.2f}%)")
+    print(
+        f"  median {risk['median']}  p95 {risk['p95']}  p99 {risk['p99']}"
+        f"  max {risk['max']}"
+    )
+
+    print("\n--- the three components, never collapsed ---")
+    components = report["components"]
+    print(
+        f"  signal strength  median {components['signal_strength']['median']}"
+        f"  (defined {components['signal_strength']['defined_pct']}%)"
+    )
+    print(f"  data quality     median {components['data_quality']['median']}")
+    print(
+        f"  uncertainty      median {components['uncertainty']['median']}"
+        f"  ({components['uncertainty']['n_saturated']:,} saturated)"
+    )
+
+    if result.calibration is not None:
+        print("\n--- does the composition behave as claimed? ---")
+        correlations = result.calibration["correlations"]
+        for name in ("risk_vs_severity", "risk_vs_confidence", "risk_vs_uncertainty"):
+            print(f"  {name:<24} {correlations[name]}")
+        attenuation = result.calibration["attenuation"]
+        print(
+            f"  the product retains a median {attenuation['median_ratio']} of the"
+            " raw signal; the rest is the price of conditioning on evidence"
+        )
+
+    print("\n--- worked examples, one per band ---")
+    for band in ("high_risk", "moderate_risk", "low_risk", "insufficient_data"):
+        subset = result.band(band)
+        if not len(subset):
+            print(f"\n  [{band}] none")
+            continue
+        row = (
+            subset["risk_score"].idxmax()
+            if band != "insufficient_data"
+            else subset.index[0]
+        )
+        print(f"\n  [{band}] record {row}")
+        print(f"    {records.loc[row, 'risk_explanation']}")
+
+    print("\n--- enriched records ---")
+    preview = [
+        "risk_score",
+        "risk_flag",
+        "risk_signal_strength",
+        "risk_data_quality",
+        "risk_uncertainty",
+        "risk_defined_reason",
+    ]
+    with pd.option_context("display.max_columns", None, "display.width", 200):
+        print(records[preview].head(head_rows).to_string())
+
+    if save:
+        ensure_dir(output_dir)
+        for name, path in result.save_reports(output_dir).items():
+            print(f"\n  {name:<20} -> {path}")
+    else:
+        print("\n  --no-save: nothing written.")
 
 
 def _run_stage4(
@@ -637,6 +833,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             run_stage3=not (args.stage1_only or args.stage2_only),
             run_stage4=not (
                 args.stage1_only or args.stage2_only or args.stage3_only
+            ),
+            run_stage5=not (
+                args.stage1_only
+                or args.stage2_only
+                or args.stage3_only
+                or args.stage4_only
+            ),
+            run_stage6=not (
+                args.stage1_only
+                or args.stage2_only
+                or args.stage3_only
+                or args.stage4_only
+                or args.stage5_only
             ),
             duplicate_diagnostics=args.duplicate_diagnostics,
         )

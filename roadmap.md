@@ -1508,7 +1508,843 @@ columns with instrumentation on and off.
 
 ---
 
-## Stages 5–7
+## Stage 5 — Risk Scoring Layer
+
+Stage 4 says what deviates and how far. Stage 5 says how much that is worth
+acting on, **given how much of it can be believed**. No record is labelled
+fraud; risk is an estimate under uncertainty, and the bands are descriptive —
+Stage 6 owns routing.
+
+### The score
+
+```
+risk_score = signal_strength × data_quality × (1 − uncertainty)
+```
+
+A product, not a sum, and that is the whole argument. A sum lets a strong
+anomaly compensate for unreadable data — exactly the inference this system
+exists to refuse. A product collapses toward zero the moment any factor is
+weak, so a serious-looking finding on a record nobody can verify scores low.
+Not because the finding is dismissed, but because *risk* is a claim about what
+is worth acting on, and acting on unverifiable evidence is not. That record is
+a remediation case, and Stage 4 already routes it as one.
+
+The three components are **always reported alongside the score**, never
+collapsed. "Risk 0.08" on its own is unusable: it could be a clean record, a
+filthy record nobody can read, or a real finding on a corpus with no peers.
+Those need three different responses.
+
+### Signal strength — boosts fill headroom, they do not add
+
+```
+strength = severity + (1 − severity) × (0.20·breadth + 0.30·extreme + 0.10·duplicate)
+```
+
+Chosen over a weighted sum for three reasons: it stays inside [0,1] without
+clipping, it is **strictly increasing in severity** so Stage 4's ordering is
+never inverted, and a boost can never *lower* a score. It also bounds the
+duplicate contribution at `(1 − severity) × 0.10 ≤ 0.10` — the cap the design
+requires, and the right one given Stage 3's measured ~1% duplicate recall.
+
+`low_confidence` is deliberately **excluded** from breadth. It describes the
+evidence, not the work, and it is already priced into the data-quality term;
+counting it in both places would charge a record twice for one defect.
+
+### Data quality — non-compensatory, like Stage 2
+
+```
+quality = confidence × min(defined Stage 2 components) × exp(−0.5·critical_deficit)
+          × cluster_penalty_factor
+```
+
+then floored at 0.05 where the dates are internally impossible. The component
+term is a **minimum, not a mean**: Stage 2's whole philosophy is that a zero
+component dominates, and averaging would let a perfect completeness score paper
+over a broken reconciliation. An undefined component is skipped, never scored
+1.0 — that is the vacuous-perfection bug Stage 2 was built to avoid.
+
+**Known double count, applied deliberately.** `critical_deficit` and
+`cluster_penalty_factor` are *already inside* Stage 2's `completeness`, so
+applying them again charges the same defect twice. The design names all three
+as inputs and the direction is conservative — it lowers risk on poor records,
+never raises it — so it is applied as specified rather than silently dropped.
+Flagged here because it is a real modelling choice, not an oversight.
+
+### Uncertainty — additive, because these are independent ways of not knowing
+
+| contribution | weight |
+|---|---|
+| severity undefined | 1.00 (saturates alone) |
+| work type has no norm | 0.60 |
+| peer cell unstable | 0.25 |
+| missing signal coverage | up to 0.30 |
+| flagged duplicate that was unreachable | 0.40 |
+
+Additive rather than multiplicative so defects accumulate: no norm *and* one
+signal *and* an unstable cell is worse than any one of them.
+
+### A term that provably cannot fire
+
+The last uncertainty contribution — flagged duplicate, not reachable — is
+**empty by construction**. Stage 4's temporal decay lies in [0,1], so a blended
+score above the 0.85 detection threshold implies a cosine above the 0.60
+reachability cut: flagged ⇒ reachable, always. Measured count on 20,000
+records: **0**.
+
+It is implemented anyway, and counted, because the day it stops being empty is
+the day Stage 3 and Stage 4 have diverged — and a risk score should say so
+rather than quietly absorb the contradiction.
+
+### The gate
+
+A score exists only where severity is defined **and** confidence clears 0.5
+**and** the work type has a norm. Otherwise the score is **NaN with a stated
+reason**, never 0.
+
+The third conjunct is **structurally redundant** — no norm ⇒ no defined
+deviation ⇒ no severity, so the first conjunct always fires first. Measured:
+it binds **0 times**. Kept as defence in depth, and the diagnostics report how
+often it actually binds so the redundancy stays visible rather than assumed.
+
+### Behaviour on 20,000 records (0.46s)
+
+| | n | % |
+|---|---|---|
+| low_risk | 12,680 | 63.40 |
+| insufficient_data | 6,040 | 30.20 |
+| moderate_risk | 1,112 | 5.56 |
+| high_risk | 168 | 0.84 |
+
+Risk defined for 69.80%; median 0.081, p95 0.238, p99 0.567, max 0.727. The
+6,040 unscored records split 4,156 severity-undefined and 1,884
+confidence-below-gate — **no score, which is not a low score**.
+
+Spearman correlations, which are the numbers that say whether the composition
+does what it claims:
+
+| relationship | ρ |
+|---|---|
+| risk vs severity | +0.630 |
+| risk vs confidence | +0.684 |
+| risk vs data quality | +0.698 |
+| risk vs uncertainty | −0.604 |
+
+Risk tracks severity and is attenuated by weak evidence, as designed. That
+confidence correlates *more strongly* than severity is worth stating plainly:
+**on this corpus, risk is driven more by how readable a record is than by how
+anomalous it is.** That is the intended philosophy taken to its conclusion, and
+it is also a warning — on a cleaner corpus the ordering would reverse, so this
+number should be re-read whenever the input data changes.
+
+The product retains a median **0.523** of the raw signal. Roughly half of every
+finding is discounted as the price of conditioning on evidence.
+
+### Two bugs found and fixed during the build
+
+1. **`np.nanmax` warned on all-undefined rows**, violating invariant 5 ("no
+   RuntimeWarning"). Caught by running the pipeline under
+   `warnings.filterwarnings("error", RuntimeWarning)` rather than by a test.
+   Replaced with a `-inf` substitution — equivalent, silent, and a row with no
+   defined z correctly scores 0 on the extreme bucket.
+2. **The explanation contradicted its own arithmetic.** It read anomaly types
+   from `type_*` columns, which Stage 4 computes but does **not** attach — only
+   the `anomaly_types` list is in the contract. So on real data the narrative
+   claimed "deviations stayed within normal range" while simultaneously
+   reporting a breadth boost from findings it had failed to see. It also called
+   a single finding "several". Both fixed; a test now asserts the text can
+   never claim a breadth boost the stored `risk_breadth` does not support.
+
+A third gap was fixed upstream: **Stage 4 computed `duplicate_reachable` and
+`duplicate_cosine` and then stranded them on the result**, never attaching them
+to the corpus. Now attached when the diagnostics run, as `OPTIONAL_STAGE4_COLUMNS`.
+
+### Files
+
+| File | Contents |
+|---|---|
+| `src/stage5/components.py` | contract check, signal strength, data quality, uncertainty |
+| `src/stage5/risk.py` | gating, composition, banding, invariants |
+| `src/stage5/explanation.py` | narrative that reconstructs its own arithmetic |
+| `src/stage5/calibration.py` | descriptive report, rank correlations |
+| `src/stage5/pipeline.py` | `RiskLayer`, `attach_risk`, 8-column contract |
+| `tests/test_stage5.py` | 128 tests |
+
+939 tests pass (811 + 128). `main.py` gains `--stage4-only`.
+
+### The explanation must show the multiplication
+
+Every scored record's narrative prints the arithmetic:
+
+> Risk 0.498 (moderate risk), composed as signal 1.000 × data quality 0.906 ×
+> stability 0.550.
+
+0.498 = 1.000 × 0.906 × 0.550. A reader who does not trust the number can check
+it from the sentence without opening the code — and a whole class of bug becomes
+impossible to hide, because a drifting explanation would not close arithmetically.
+A test asserts the product holds on every defined record to 1e-12.
+
+### Known limitations
+
+1. **Nothing is calibrated.** Every weight, band and decay rate is a judgement:
+   `R_HIGH = 0.50`, `R_LOW = 0.20`, `RISK_CRITICAL_DEFICIT_DECAY = 0.5`, the
+   three signal weights, the five uncertainty weights. They were chosen before
+   the distribution was measured and were **not** adjusted afterwards. The
+   0.84% high-risk rate is a consequence of those choices, not evidence for them.
+2. **The multiplicative form is structurally deflationary.** Three factors each
+   below 1 compound: the median score retains 52% of its raw signal, and the
+   maximum observed risk is 0.727 — nothing reaches 1.0 in practice. If a
+   future reviewer wants `R_HIGH` to mean "top decile", that is a threshold
+   argument, not a formula argument, and it should be had in the open.
+3. **Confidence outweighs severity in driving the score** (ρ 0.684 vs 0.630).
+   Philosophically intended; empirically worth re-checking on cleaner data.
+4. **The double count in data quality** (see above) is applied as specified.
+5. **30.20% of records receive no risk score at all.** That is the data's fault,
+   not the layer's, and the system says so rather than defaulting them to safe.
+6. Stage 3 audit findings **N1–N4 remain open**; duplicate recall is still ~1%.
+
+---
+
+## Stage 5 Audit — one structural fix, two refusals
+
+Verdict: **CONDITIONAL PASS**. One critical flaw found, proven and fixed. Two
+mandated changes refused with proof, because applying them would have broken
+guarantees the same brief required preserving.
+
+### CRITICAL — data_quality double-counted Stage 2, two to four times over
+
+`quality = confidence × component_floor × exp(−0.5·critical_deficit) ×
+cluster_penalty_factor`. All three modifiers are *already inside* confidence:
+`critical_deficit` and `cluster_penalty_factor` are inputs to `C_comp`, and the
+component floor is built from the very three scores confidence aggregates.
+
+Proof:
+
+| measurement | value |
+|---|---|
+| `component_floor == completeness` | 13,795 / 20,000 (68.97%) |
+| `deficit_factor < 1.0` | 12,419 (62.09%) |
+| median quality, as shipped | 0.495 |
+| median quality, duplication removed | 0.754 |
+| **median suppression** | **34.29%** |
+
+Consequence, and the reason this was critical rather than cosmetic: it inverted
+the ordering the layer exists to produce. Risk correlated more strongly with
+**confidence (0.684)** than with **severity (0.630)**.
+
+**Fix — a minimum, not a re-weighted product:**
+
+```
+quality = min(confidence, completeness, temporal, reconciliation)   # defined only
+```
+
+`min` is **idempotent**, so a quantity appearing twice contributes exactly once.
+That fixes the class of bug structurally rather than by tuning a weight: a
+product would need every input audited for overlap forever. It is also strictly
+non-compensatory — the property the product was reached for in the first place.
+`critical_deficit` and `cluster_penalty_factor` are no longer applied; both are
+still **reported** so an auditor reading a low score can still see them.
+
+### The fix resolved the dominance imbalance without touching a weight
+
+| metric | before | after |
+|---|---|---|
+| corr(risk, severity) | 0.630 | **0.888** |
+| corr(risk, confidence) | 0.684 | **0.367** |
+| log-variance: signal | 59.34% | **92.06%** |
+| log-variance: quality | 40.07% | 7.02% |
+| log-variance: stability | 0.59% | 0.92% |
+
+No reweighting, no transformation, no capping was needed. The imbalance was a
+symptom of the double count, not an independent defect — which is why removing
+the cause was the right move and tuning a weight would have masked it.
+
+### REFUSED 1 — "signal_strength == 0 → risk MUST be NaN"
+
+Five records have `signal_strength == 0`. Their profile: `severity_defined =
+True`, `valid_signal_count ≥ 1`, confidence 0.738–0.771, `anomaly_count = 0`.
+
+They were **measured, and found clean**. Reporting NaN would assert "could not
+be assessed", which is false, and would destroy the Stage 4/5 distinction that
+the whole system rests on — `0` means measured-and-normal, `NaN` means unknown.
+The brief that mandates this invariant also mandates not breaking prior
+guarantees; on this input the two conflict, and the prior guarantee is the one
+worth keeping. Not applied. A test documents the reasoning at the point of
+refusal.
+
+### REFUSED 2 — a decompressing transform for the max<0.9 trigger
+
+After the fix, `p99 = 0.605` clears its trigger. `max = 0.730` still does not.
+
+Option A (geometric mean, `(S·Q·(1−U))^(1/3)`) was measured rather than argued
+about: it exceeds the record's own signal strength on **13,811 of 13,960 scored
+records (98.93%)**, worst case inflating a signal of 0.192 to 0.577. It
+directly violates "never inflates weak evidence". Options B and C decompress by
+the same mechanism.
+
+The residual ceiling is a **fact about the corpus, not the formula**: no record
+simultaneously has maximal signal, perfect evidence and full coverage. A
+synthetic record that does scores exactly **1.0**, and there is a test proving
+it. Rescaling to reach 0.9 would manufacture a number no record earns. Not
+applied.
+
+### MAJOR — three of five uncertainty terms cannot fire inside the score
+
+Measured on the **scored subset**, which is the only place uncertainty affects
+anything:
+
+| term | fires corpus-wide | fires on scored records |
+|---|---|---|
+| coverage | 61.89% | 32.52% |
+| unstable_cell | 21.45% | 0.60% |
+| no_severity | 20.78% | **0.00%** |
+| no_norm | 7.62% | **0.00%** |
+| unreachable_duplicate | 0.00% | **0.00%** |
+
+`no_severity` and `no_norm` are redundant with the gate — it excludes exactly
+the records that would trigger them. `unreachable_duplicate` is provably empty.
+Effective uncertainty on a scored record is therefore
+`0.25·unstable + 0.30·(1 − coverage/3)`, bounded at 0.55, carrying 0.92% of the
+log-variance.
+
+Retained as invariant guards — they are **alive in the reported column**, which
+covers every record including unscored ones, and they would fire if the gate
+were loosened or if Stage 3 and Stage 4 diverged. Their deadness is now
+**published** in `uncertainty_liveness` rather than assumed.
+
+### MINOR — the explanation attributed quality to a factor it no longer uses
+
+After the fix the narrative still said "Data quality 0.906 follows from ...
+critical fields missing (factor 0.61)". Corrected: quality is now described as
+"the lowest of ..." and the deficit is reported separately as "already inside
+its confidence and reported here rather than charged again".
+
+### TASK 7 — calibration honesty
+
+Both Stage 5 reports now carry `CALIBRATION_STATUS_BANNER`:
+
+> **UNFIT FOR PRODUCTION — NOT CALIBRATED.** Every threshold and weight in
+> Stage 5 is a stated judgement; none has been fitted to, or validated against,
+> real outcomes. The system has only ever been run on synthetic data with
+> injected defects, so no number here estimates a real-world rate of anything.
+
+`R_HIGH = 0.50`, `R_LOW = 0.20`, `MIN_CONFIDENCE_FOR_RISK = 0.5` are unchanged
+from before the audit, and a test asserts they are still the round untouched
+constants — a tuned threshold would show up there as a non-round number.
+
+### Before vs after
+
+| | before | after |
+|---|---|---|
+| risk p50 | 0.0812 | 0.1137 |
+| risk p95 | 0.2376 | 0.2581 |
+| risk p99 | 0.5668 | **0.6053** |
+| risk max | 0.7271 | 0.7304 |
+| high_risk | 168 (0.84%) | **291 (1.46%)** |
+| moderate_risk | 1,112 | 1,452 |
+| low_risk | 12,680 | 12,217 |
+| insufficient_data | 6,040 | 6,040 (unchanged) |
+| corr(risk, severity) | 0.630 | **0.888** |
+
+Spearman(risk_before, risk_after) = 0.892 — deliberately **not** 1.0. This was a
+correction, not a rescale; records penalised differently for the same defect
+change rank relative to one another, which is the fix working.
+
+Gating is untouched: the same 6,040 records are unscored, for the same reasons.
+
+### Files
+
+| File | Change |
+|---|---|
+| `src/stage5/components.py` | `data_quality` is now a minimum; uncertainty firing rates published |
+| `src/stage5/explanation.py` | no longer attributes quality to the deficit factor |
+| `src/stage5/calibration.py` | banner, `uncertainty_liveness` section |
+| `src/stage5/pipeline.py` | banner on the risk report |
+| `src/core/constants.py` | `CALIBRATION_STATUS_BANNER` |
+| `tests/test_stage5_audit.py` | **new** — 50 tests |
+
+989 tests pass (939 + 50). The 128 existing Stage 5 tests were **not modified**.
+
+### Known limitations after the audit
+
+1. **Still not calibrated**, and now says so on every report.
+2. **`RISK_CRITICAL_DEFICIT_DECAY` is now decorative** — it shapes a reported
+   diagnostic and nothing else. Kept so the column keeps its meaning; a future
+   pass may remove it entirely.
+3. **Uncertainty is nearly inert inside the score** (0.92% of log-variance).
+   Whether it deserves to be a full factor in the product, rather than a
+   reported caveat, is a live design question this audit did not settle.
+4. **max risk 0.730 < 0.9** persists, by the data, not the formula.
+5. Stage 3 audit findings **N1–N4 remain open**; duplicate recall is still ~1%.
+
+---
+
+## Stage 5 Hardening — surgical, and numerically inert
+
+Verdict: **PASS**. Every score, band and ranking is **byte-identical** to before
+the pass. One mandated restructuring was refused with proof; two measurement
+bugs in the audit's own diagnostics were found and fixed.
+
+### The headline finding: "uncertainty is dead" was wrong
+
+The audit reported uncertainty at **0.92% of variance** and the brief called it
+"functionally dead". Both the number and the conclusion were wrong.
+
+**The conclusion was wrong** because variance share cannot see decisions. The
+decisive test is whether removing the factor changes an outcome:
+
+| test | result |
+|---|---|
+| spearman(risk with U, risk without U) | 0.99305 — **not** 1.0 |
+| scored records with U > 0 | 6,503 / 13,960 (46.58%) |
+| records whose rank changes | 13,915 (99.68%) |
+| **records whose BAND changes** | **294** |
+| high_risk with U vs without | 291 → **367** (+26% escalation queue) |
+
+A factor carrying 2% of the spread still moves 294 records across a band
+boundary, 76 of them into the investigate queue. **Uncertainty is load-bearing.
+No restructuring applied.** Options A, B and C were all rejected — and the
+report now runs this removal test itself and publishes the verdict, so the
+question is settled by measurement on every run rather than by argument.
+
+**The number was wrong** for two independent reasons, both found in this pass:
+
+1. **Variance share ignores covariance.** For a sum in log space the honest
+   attribution is `cov(x, log R) / var(log R)`, which sums to exactly 100%.
+2. **Two bugs in that computation**, caught by tightening the sum-to-100% test
+   from `abs=0.5` to `abs=1e-6`:
+   - Records with a zero factor were `clip`ped to `1e-12`, breaking the identity
+     `log R = log S + log Q + log(1−U)`. They are now **excluded and counted**,
+     never approximated.
+   - `np.cov` defaults to `ddof=1` while `np.var` defaults to `ddof=0`. Mixing
+     them scaled every share by `n/(n−1)` — the corpus reported **100.91%**,
+     and a 500-row test reproduced `500/499 = 1.002004` exactly.
+
+Corrected attribution:
+
+| factor | variance share | covariance share |
+|---|---|---|
+| signal_strength | 88.31% | **85.10%** |
+| data_quality | 10.34% | **12.65%** |
+| stability | 1.35% | **2.25%** |
+| | | **sums to 100.0000%** |
+
+Stability is 2.25%, not 0.92% — 2.4× the reported figure and above the 1% flag
+threshold. The flag itself is documented as **"FLAGGED FOR REVIEW, NOT FOR
+REMOVAL"**, because this pass is the demonstration of why those differ.
+
+### Fix 2 — the explanation names only what the score uses
+
+Tightened from the audit's "name the inactive factor but say it is not charged"
+to **"do not name it"**. A narrative claiming to reconstruct the arithmetic
+cannot also discuss a term outside the arithmetic, however carefully caveated.
+`risk_deficit_factor` and `cluster_penalty_factor` are gone from the text; both
+remain as columns and in the calibration report. Gate-redundant uncertainty
+terms are likewise never named on a scored record, where they cannot be true.
+
+The round-trip test never reads a component column. It parses the numbers back
+out of the English and re-multiplies them, with a tolerance **derived** from the
+3-decimal print precision (`3 × 5e-4`), not chosen. Over the full corpus:
+
+| check | result |
+|---|---|
+| scored explanations parsed and re-multiplied | 13,960 |
+| arithmetic or band mismatches | **0** |
+| explanations naming an inactive factor | **0** |
+
+### Fix 3 — every uncertainty component classified, and the class verified
+
+| component | class | corpus | scored |
+|---|---|---|---|
+| coverage | active | 61.89% | 32.52% |
+| unstable_cell | active | 21.45% | 0.87% |
+| no_severity | gate_redundant | 20.78% | **0.00%** |
+| no_norm | gate_redundant | 7.62% | **0.00%** |
+| unreachable_duplicate | structurally_impossible | 0.00% | **0.00%** |
+
+All retained, each against a stated criterion: the gate-redundant pair **applies
+to unscored records**, where the reported uncertainty column is the entire
+answer; the impossible one **protects an invariant** across the Stage 3/4
+boundary. The classification is published, and a test asserts the published
+class matches measured behaviour — a claim of "gate-redundant" that stopped
+being true would fail.
+
+### Fix 4 — the zero-signal records are measured-normal, proven from the reason
+
+Five records have `signal_strength == 0`. The proof is Stage 3's reason column,
+not the value:
+
+```
+deviation_cell_cost = 0.0    deviation_cell_cost_reason = "defined"
+valid_signal_count  = 1      severity_defined = True
+confidence          in [0.738, 0.771]
+```
+
+Stage 3 **computed** a peer comparison and it landed on the median. That is a
+measurement, not a gap. `risk = 0` stays; NaN would be a false claim of
+ignorance and would collapse the distinction the whole system rests on.
+
+### Fix 5 — extreme inputs
+
+All four mandated shapes plus numeric extremes (`1e-300`, `±1e308`,
+`critical_deficit = 1e6`) produce no negative, inflated, infinite or undefined
+value, under `warnings.simplefilter("error", RuntimeWarning)`. Monotonicity in
+severity holds across `0 → 1e-9 → 0.001 → 0.5 → 0.999 → 1.0`.
+
+### Fix 6 — distribution honesty
+
+Unchanged and un-rescaled. p50 0.1137 · p90 0.2126 · p95 0.2581 · p99 0.6053 ·
+max 0.7304. The multiplicative structure was verified intact rather than
+assumed: `E[log risk] = −2.272832` against `Σ E[log factor] = −2.273096`, the
+residual being exactly the zero-factor records now excluded from attribution.
+
+Added beside every distribution:
+
+> **Risk values are NOT calibrated thresholds.** A risk of 0.5 does not mean a
+> 50% chance of anything; it is a position on an uncalibrated ordinal scale
+> produced by this corpus and these judgements.
+
+### No-change confirmation
+
+| | before | after |
+|---|---|---|
+| p50 / p95 / p99 / max | 0.113716 / 0.258133 / 0.605283 / 0.730351 | **identical** |
+| high / moderate / low | 291 / 1,452 / 12,217 | **identical** |
+| unscored | 6,040 | **identical** |
+
+1,038 tests pass. The 128 Stage 5 tests and 49 of the 50 audit tests were not
+modified; one audit test was updated because Fix 2 **superseded** its
+requirement, and its docstring records that.
+
+### Files
+
+| File | Change |
+|---|---|
+| `src/stage5/explanation.py` | names only active factors |
+| `src/stage5/calibration.py` | `compute_contribution_analysis`, liveness detail, threshold note |
+| `src/core/constants.py` | `UNCERTAINTY_COMPONENT_CLASS`, flag threshold, note |
+| `tests/test_stage5_hardening.py` | **new** — 49 tests |
+
+### Known limitations after hardening
+
+1. **Still not calibrated**, and every report says so twice.
+2. **`RISK_CRITICAL_DEFICIT_DECAY` remains decorative** — it shapes a reported
+   diagnostic and nothing else.
+3. **Stability contributes 2.25%** of the spread. Load-bearing, but whether it
+   deserves to be a full multiplicative factor rather than a reported caveat is
+   still an open design question — now with a number attached.
+4. **max risk 0.730 < 0.9**, by the data and not the formula.
+5. Stage 3 audit findings **N1–N4 remain open**; duplicate recall is still ~1%.
+
+---
+
+## Stage 6 — Action & Routing Layer
+
+Policy, not inference. Stage 6 computes nothing: it maps the Stage 4 decision
+and the Stage 5 risk band onto an action, a priority, a queue and a sentence a
+human can act on. Every rule is a table lookup an operations lead could change
+without a developer.
+
+### Three defects in the specification, all measured before coding
+
+| defect | evidence | resolution |
+|---|---|---|
+| **Gap** — `INVESTIGATE + low_risk` matches none of CASES 1–5 | **6 records** | Filled from EDGE CASE 3 → `ESCALATE_REVIEW` |
+| **Collision** — every REMEDIATE also satisfies CASE 5's `risk_defined == False` | **2,638 records** | CASE 3 wins; see below |
+| **Missing column** — the brief requires `anomaly_reason` | Stage 4 emits `decision_reason` | Treated as optional, never required |
+
+**On the collision.** Stage 4 routes to REMEDIATE precisely when confidence is
+too low for Stage 5 to score, so *all* 2,638 REMEDIATE records satisfy both
+cases. CASE 3 names the decision class; CASE 5 is a fallback — the explicit
+rule wins. It is also more actionable: REMEDIATE means *this record's own
+evidence is weak*, which the field officer who filed it can fix, whereas the
+data-quality queue is for records nothing could be said about. Resolving the
+other way would have put **30% of the corpus into P1** and emptied the word
+"priority" of meaning.
+
+### A fourth defect, found by an exhaustive test rather than by reading
+
+`TestPolicyTotality` enumerates every `decision_class × risk_flag` combination,
+including ones the corpus does not contain. It failed:
+
+> `AssertionError: a high_risk record was given the lowest priority`
+
+`MONITOR + high_risk` falls to CASE 4 → `PASSIVE_MONITOR` → **P3**, breaching
+invariant 4 (*high_risk must never map to P3*). CASE 4 and invariant 4
+contradict each other, and the reference corpus hides it — all 291 high_risk
+records are INVESTIGATE.
+
+**It is reachable, not hypothetical.** Stage 4 monitors below `|z| = 3.5`, so
+severity can reach ≈0.7; with breadth boosting the signal to ≈0.76 and clean,
+fully-covered evidence, Stage 5 can band such a record `high_risk`.
+
+Resolved with one rule, `disagreement_high_risk` → `ESCALATE_REVIEW`. It is the
+**mirror of EDGE CASE 3**, which resolves the opposite disagreement the same
+way: when the two stages differ, a human looks. Stage 6 invents no verdict — it
+declines to pick the quieter of two upstream answers.
+
+### M1 — the fix this stage exists for
+
+Stage 5's audit found records escalated with **no named finding**: Stage 4
+gates `underspend_anomaly` on lifecycle, but its routing and Stage 5's severity
+both read `|z|`, so a large underspend on an unfinished work escalates unlabelled.
+**18 records** on the reference corpus (4 of them P0). They now carry
+`unexplained_deviation`.
+
+Two deliberate deviations from the letter of the brief:
+
+1. **Stage 4's `anomaly_types` is not mutated.** The corrected list goes to a
+   new column, `action_anomaly_types`. Stage 4 is locked with byte-identical
+   guarantees, and a downstream layer quietly rewriting it would make a re-run
+   of Stage 5 read different inputs than the first run did.
+2. **The correction keys off the action, not `decision_class`.** Invariant 6
+   requires a finding on every `ESCALATE_*` record. Every INVESTIGATE escalates,
+   but the reverse is not guaranteed once `disagreement_high_risk` exists.
+   Keying on the action covers the mandated case exactly and closes that one too.
+
+### Routing on 20,000 records (0.24s)
+
+| queue | n | % | priority |
+|---|---|---|---|
+| automated_monitoring | 13,541 | 67.70 | P3 |
+| data_quality_team | 3,402 | 17.01 | P1 |
+| field_officer | 2,638 | 13.19 | P2 |
+| fraud_investigation_team | 291 | 1.46 | P0 |
+| audit_team | 128 | 0.64 | P1 |
+
+Rules fired: monitor 13,541 · insufficient_context 3,402 · remediate 2,638 ·
+investigate_high 291 · investigate_moderate 122 · investigate_low 6. The two
+backstop rules (`investigate_unscored`, `disagreement_high_risk`) fired **0**
+times — correct, and retained because both are reachable in principle.
+
+**291 records reach a human investigator; 128 more reach an auditor.** That is
+2.1% of the corpus, from 20,000 records nobody could read by hand.
+
+### The explanation is machine-checkable
+
+Five lines, fixed order, one field each — and `parse_action_explanation` is the
+exact inverse of `explain_action`, shipped in the same module so the two cannot
+drift:
+
+```
+Record routed to ESCALATE_IMMEDIATE because:
+- Findings: cost_outlier
+- Severity: 0.601
+- Risk: 0.730
+- Decision basis: INVESTIGATE with high_risk
+```
+
+A test parses **every** generated explanation and compares each field against
+its stored column. A narrative that stops matching its record fails the build.
+The definedness flag is authoritative, not the number: a stray `severity_score`
+on a record with `severity_defined == False` prints as `not defined`, and a
+test asserts it.
+
+### Files
+
+| File | Contents |
+|---|---|
+| `src/stage6/routing.py` | contract check, M1 correction, the 8-rule policy table, invariants |
+| `src/stage6/explanation.py` | the fixed format, and its parser |
+| `src/stage6/pipeline.py` | `ActionLayer`, `attach_actions`, queue and priority views |
+| `tests/test_stage6.py` | 81 tests |
+
+1,119 tests pass (1,038 + 81). `main.py` gains `--stage5-only`.
+
+### Known limitations
+
+1. **The policy is judgement, like everything upstream.** Which team owns which
+   action, and that P0 means fraud investigation, are organisational choices
+   with no evidence behind them. They are in `constants.py` so changing them is
+   a one-line edit, not a code change.
+2. **17.65% of the corpus lands in P1.** Driven by the 3,402 unscorable
+   records, not by anomaly volume. If a data-quality team cannot absorb that,
+   the fix is upstream data collection, not a threshold here.
+3. **`unexplained_deviation` names a gap, it does not close it.** The real fix
+   is for Stage 4 to say *what* deviated — a lifecycle-gated underspend is a
+   specific, nameable thing. Stage 6 can only report that Stage 4 declined to
+   name it.
+4. **Nothing is calibrated**, and Stage 5's reports still say so on every run.
+5. Stage 3 audit findings **N1–N4 remain open**; duplicate recall is still ~1%.
+
+---
+
+## Stage 6 Hardening — self-validation and contract alignment
+
+No routing decision changed. Every action, priority, rule and M1 count is
+**identical** to before the pass, verified record by record on 20,000 rows. The
+pass added aliases, a machine-readable payload, and three checks for
+assumptions that were previously being trusted in silence.
+
+### A third vocabulary, found by reading the PRD
+
+`Stage6.md` names its outputs **INVESTIGATE / REMEDIATE / MONITOR / CLEAR**.
+That matches neither the build brief's five action names nor the audit brief's
+six. Those PRD names are *decision* names, and Stage 4 already implements them
+as `DECISION_CLASSES` (with `INSUFFICIENT_CONTEXT` in place of `CLEAR`) — so
+Stage 6 as built is an action layer sitting on top of the PRD's decision layer,
+not a competing implementation of it. All three vocabularies are now documented
+together in `SPEC_ACTION_CLASSES`.
+
+### C1 — contract alignment, additively
+
+| spec name | as-built source |
+|---|---|
+| `action` | `action_class` |
+| `priority` | `priority_level` |
+| `action_reason` | `action_rule` |
+| `action_spec` | `SPEC_ACTION_ALIAS[action_class]` |
+
+Nothing renamed, nothing removed. Every alias is **asserted equal to its
+source on each run** — an alias that drifted would be worse than none at all:
+two columns disagreeing about one decision.
+
+`ESCALATE_IMMEDIATE → ESCALATE_INVESTIGATION`, `REQUEST_CORRECTION →
+ROUTE_REMEDIATE`, `PASSIVE_MONITOR → MONITOR_PASSIVE`, `ESCALATE_REVIEW`
+unchanged. **`DATA_QUALITY_REVIEW → ROUTE_AUDIT` is the weakest of the five**
+and is documented as such: the specification offers no data-quality action, and
+ROUTE_AUDIT is the nearest remaining sense of "a team must look before this can
+be judged".
+
+**`HOLD_NO_ACTION` has no producer, deliberately.** Stage 6 never concludes a
+record needs nothing: its quietest outcome is `PASSIVE_MONITOR`, a standing
+watch rather than a dismissal. Representable, never emitted, and asserted so.
+
+### M2 + M3 — a canonical machine form, alongside the human one
+
+The five-line sentence is written for a person and pays for it twice: it omits
+`priority` (recoverable 0 / 20,000) and its delimiters are ambiguous. The audit
+proved three collisions by construction — a finding containing `", "` parsed
+back as two, a `decision_class` containing `" with "` split in the wrong place,
+and a finding literally named `"none recorded"` was indistinguishable from
+having none.
+
+**Resolution: a new `explanation_payload` column carrying canonical JSON.** It
+escapes every delimiter, distinguishes an empty list from any string, and
+round-trips arbitrary content — including quotes, backslashes, newlines and
+unicode. Keys are sorted and separators compact, so two runs produce identical
+bytes.
+
+The human `explanation` is left **byte-identical** (all 20,000 still exactly
+five lines). That is a deliberate reading of the constraint *"ALL existing tests
+must pass unchanged"*: `test_the_format_is_exactly_five_lines` pins the format,
+so the machine form had to arrive as a new column rather than a rewrite.
+`parse_action_explanation` is now documented as best-effort for humans and
+**not** the machine contract.
+
+| | before | after |
+|---|---|---|
+| priority recoverable | 0 / 20,000 | **20,000 / 20,000** |
+| payload field mismatches | — | **0** across 100,000 field comparisons |
+| `NaN` in any payload | — | **0** (absent numbers are `null`) |
+
+### M1 + M4 + m1 — Stage 6 now validates itself
+
+Three checks run at pipeline entry, ordered so a failure is cheapest to
+diagnose: configuration, then shape, then cross-field consistency.
+
+* **`assert_gate_alignment()`** — refuses to route when
+  `CONFIDENCE_GATE_THRESHOLD != MIN_CONFIDENCE_FOR_RISK`. Both derive from
+  `PEER_STAT_MIN_CONFIDENCE`, so it passes by construction today; it exists so
+  a future edit fails here rather than silently breaking an invariant three
+  stages away.
+* **`validate_stage5_contract()`** — verifies
+  `risk_flag == "insufficient_data" ⟺ ¬risk_defined`. Eight policy predicates
+  read `risk_flag` and five read `risk_defined`; nothing previously checked
+  they agree, so a disagreement surfaced as an internal `AssertionError` from
+  deep inside the invariant block instead of a contract error at the door.
+* **`require_unique_index()`** — replaces pandas' opaque
+  *"cannot reindex on an axis with duplicate labels"* with a message naming the
+  duplicated labels and the requirement broken.
+
+All three raise `Stage6ContractError`, a subclass of `Stage6InputError`, because
+the remedy differs: a missing column means a stage was not run, a contradictory
+one means a stage produced something impossible.
+
+### One fix deliberately NOT made, and why
+
+The audit's headline break — `RiskConfig(min_confidence=0.80)` producing **73
+records** that are `INVESTIGATE` yet `insufficient_data`, every one escalated —
+is **still reachable**.
+
+Closing it means rejecting `decision_class == INVESTIGATE ∧ ¬risk_defined`. That
+check was written, and it failed three existing policy tests that construct
+exactly that combination on purpose, and it made the `investigate_unscored`
+backstop rule unreachable. More importantly, routing such a record requires
+breaking one of two invariants — *never downgrade an escalation* or *never
+escalate insufficient data* — and choosing which is a **policy decision, not a
+validation one**.
+
+The brief's own instruction settled it: *"Only fix what is proven broken.
+Everything else is preserved."* `assert_gate_alignment` catches the
+constant-level case; the configured case is documented in
+`validate_stage5_contract`'s docstring and remains open for a deliberate
+decision.
+
+### Regression
+
+| | before | after |
+|---|---|---|
+| PASSIVE_MONITOR / DATA_QUALITY_REVIEW / REQUEST_CORRECTION | 13,541 / 3,402 / 2,638 | **identical** |
+| ESCALATE_IMMEDIATE / ESCALATE_REVIEW | 291 / 128 | **identical** |
+| P0 / P1 / P2 / P3 | 291 / 3,530 / 2,638 / 13,541 | **identical** |
+| all six firing rules | unchanged | **identical** |
+| M1 corrections | 18 | **identical** |
+
+1,174 tests pass (1,119 + 55). The 81 existing Stage 6 tests were **not
+modified**.
+
+### Files
+
+| File | Change |
+|---|---|
+| `src/stage6/routing.py` | `Stage6ContractError`, three entry checks |
+| `src/stage6/explanation.py` | JSON payload builder and parser; human form untouched |
+| `src/stage6/pipeline.py` | five alias columns, alias equality asserted |
+| `src/core/constants.py` | `SPEC_ACTION_CLASSES`, `SPEC_ACTION_ALIAS`, `SPEC_COLUMN_ALIAS` |
+| `tests/test_stage6_hardening.py` | **new** — 55 tests |
+
+### Second hardening pass — specification realignment
+
+A later specification revised three things this pass implemented:
+
+* **`action_spec` now maps to the PRD vocabulary and is deliberately lossy.**
+  `ESCALATE_IMMEDIATE` and `ESCALATE_REVIEW` both become `INVESTIGATE`, so the
+  alias alone cannot separate 291 P0 fraud referrals from 128 P1 audit reviews.
+  That distinction survives in `action_class` and `priority_level`, both
+  unchanged, and a test pins that it survives somewhere. The prior one-to-one
+  mapping is retained as `SPEC_ACTION_ALIAS_V1` so the change is traceable.
+* **Two dedicated exception types.** `Stage6ConfigError` for a threshold that
+  cannot support the invariants (no record is at fault, no rerun helps), and
+  `Stage6InvariantError` for a post-routing guarantee — a `RuntimeError`, not an
+  `AssertionError`, so the checks survive `python -O` and a caller can catch a
+  Stage 6 failure specifically.
+* **The payload gained `rule`, `findings` and `reason`.** `anomaly_types` is
+  kept as a synonym of `findings` so the earlier payload contract still
+  resolves, and an I5 assertion checks the two agree on every record.
+
+Three tests changed, each carrying a docstring recording what superseded it:
+the injectivity assertion (the spec revoked it) and two that expected
+`Stage6ContractError` where a `Stage6ConfigError` is now mandated.
+
+1,185 tests pass. Routing counts, priorities and M1 corrections are byte-identical.
+
+### Known limitations after hardening
+
+1. **The configured gate-drift vector remains open** (see above). It is a
+   policy decision awaiting an owner, not an oversight.
+2. **`DATA_QUALITY_REVIEW → ROUTE_AUDIT` is an imprecise alias.** The
+   specification has no data-quality action; a consumer reading `action_spec`
+   will see audit work and data-quality work under one name.
+3. **Two explanation formats now exist.** The human one is not injection-safe
+   and never will be; the payload is authoritative. A consumer that parses the
+   sentence instead of the payload gets the old ambiguity.
+4. **P1 still conflates two meanings** — 3,402 data-quality records and 128
+   audit escalations share a priority band.
+5. Stage 3 audit findings **N1–N4 remain open**; nothing downstream is calibrated.
+
+---
+
+## Stage 7
 
 Not started. Strict order is enforced: no stage begins until the previous one's
 tests pass.
