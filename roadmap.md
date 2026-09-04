@@ -778,7 +778,333 @@ record · deterministic · 50k in 0.147 s. Ready for Stage 3.
 
 ---
 
-## Stages 3–7
+## Stage 3 — Peer Structure Layer
+
+**Status: COMPLETE** · **Tests: 109 Stage 3, 532 total, 0 failing**
+**Runtime: 0.80s at 20k, well inside `Stage3.md` §11's 10s budget**
+
+Builds the comparison groups every downstream signal is measured against:
+
+```
+peer_cell = (semantic cluster k, cost stratum s)
+```
+
+Stage 3 produces **structure**. It ends at deviations from peer norms and does
+not score or classify — a boundary asserted by `TestScopeBoundary`.
+
+### Clustering method
+
+| step | choice | why |
+| --- | --- | --- |
+| Embedding | **TF-IDF**, not a sentence transformer | Every dimension is a token you can name. `Stage3.md` §5.2 suggests `all-MiniLM-L6-v2`; for a system whose thesis is auditability, an explanation that says *"similar because both are 'cc road' works"* beats a 384-dim vector that can say nothing. Also deterministic, no download. |
+| Normalisation | truncate at locality delimiter, strip geography + action boilerplate | See below — this is the load-bearing part |
+| Projection | TruncatedSVD, 16 dims, seed 42 | Measured optimum: 8 dims → 0.704 purity, 16 → 0.924, 24+ → 27–41% noise |
+| Clustering | **HDBSCAN** over *distinct texts* | No `k`, deterministic, explicit noise |
+| Labels | top TF-IDF terms per cluster | Clusters form in SVD space, are **named in token space** — interpretability survives the reduction |
+
+**Two decisions that carried the result.**
+
+*Cluster distinct texts, not records.* Names are heavily templated: 20,000
+records reduce to 91 distinct normalised strings. Clustering the strings and
+broadcasting labels back took **0.08s vs 5.01s** at 20k, and **0.04s vs 27.0s**
+at 50k — the difference between sitting inside the budget and missing it by
+2.7×. It is also better statistics: identical text must get an identical cluster
+anyway, and collapsing removes the artificial density spikes templated naming
+creates in a density-based algorithm.
+
+*Truncate the locality clause.* Every name reads
+`"<action> <work type> at <locality>, <district>"`. Left whole, village names
+split single work types across places — `"check dam"` became one cluster for
+Peddapalli and another for Nandgaon — so **geography was silently becoming a
+grouping feature**, which is exactly what the grouping/testing separation
+forbids. District stripping cannot catch this: village names appear in no
+district column, and where localities are spread evenly across districts no
+statistical test distinguishes them from work-type tokens either. Position is
+the signal, so position is used.
+
+**Measured against generator ground truth** (a test-only oracle: the generator
+built every name from a 20-item work-type vocabulary):
+
+| n | clusters | noise | weighted purity |
+| --- | --- | --- | --- |
+| 5,000 | 13 | 11.2% | 0.802 |
+| 10,000 | 16 | 5.0% | 0.819 |
+| **20,000** | **17** | **7.6%** | **0.924** |
+| 50,000 | 17 | 5.0% | 0.917 |
+
+`cc road` / `bituminous road`, `school building` / `library building`,
+`street light` / `solar street lighting` all separate correctly.
+
+### Peer cell definition
+
+`k` = cluster, `s` = quintile of `log(sanction+1)`; missing amount → `s = -1`.
+`peer_cell_stable = size ≥ 15` (`Stage3.md` §8.1). At 20k: **108 cells, 71
+stable, covering 78.6% of records**.
+
+A cell built on `k = -1` is **forced unstable** however large: noise points are
+not similar to one another, and 1,500 of them sharing a stratum is a bucket, not
+a peer group.
+
+### Confidence gating logic — the critical property
+
+A cell's median and MAD are the yardstick every member is judged against. Let a
+record with an unreadable amount or a fabricated timeline shape that yardstick
+and **the corruption propagates to every honest record in the cell**.
+
+The basis excludes `confidence < 0.5`, `reconciliation_branch ∈ {non_finite,
+implausible_magnitude}`, and any non-finite or implausible amount. **86.7% of
+records may shape a norm.**
+
+Gated records are **not dropped**. They keep their cell and are measured against
+the clean norm — they are the REMEDIATE population, and discarding them would
+repeat Stage 1's silent-corruption mistake one layer up. They simply get no vote
+on what normal looks like. `TestConfidenceGating` proves it end to end: twelve
+garbage records at 100× the normal amount added to a cell move its median by
+less than 0.2 in log space.
+
+### Deviation preparation — **not** scoring
+
+```
+deviation = (x − median_group(x)) / (1.4826 · MAD_group(x))
+```
+
+Median and MAD only, never mean and σ — robust to 50% contamination (README §2),
+because a cluster half-full of fraud must still yield a usable norm.
+
+| deviation | level | defined at 20k | |p95| |
+| --- | --- | --- | --- |
+| `deviation_cell_cost` | (k,s) | 78.55% | 1.69 |
+| `deviation_cluster_cost` | k only | 85.77% | 4.64 |
+| `deviation_spend_ratio` | (k,s) | 62.22% | 2.00 |
+| `deviation_duration` | (k,s) | 48.05% | 1.46 |
+
+**Undefined is never zero.** A deviation is `NaN` with a recorded reason
+(`feature_missing`, `cell_unstable`, `no_peer_norm`, `zero_dispersion`) whenever
+it cannot be measured — reporting zero would say "exactly normal", the opposite
+of what is known. Same rule Stage 2 enforces for its components.
+
+Both levels are kept on purpose: stratifying is conservative and hides gross
+cost inflation (an inflated work just lands in a higher stratum), so the
+cluster-level view recovers the sensitivity. Its wider p95 is that difference.
+
+### Three defects validation caught, and how
+
+Validation against ground truth found problems that passing tests did not:
+
+1. **18 records with `inf`/1e300 sanctions were shaping peer norms.** Stage 2
+   labels a record `implausible_magnitude` only when *both* amounts are present;
+   one with a 1e300 sanction and a missing spend is `one_null` and slipped the
+   branch gate. Fixed with an explicit magnitude check → **0 remaining**.
+2. **Duplicate detection was reusing the clustering vectors** — which have the
+   locality stripped, so every road in a district looked identical. Precision
+   0.047. Fixed by giving duplicates their own **untruncated, digit-preserving**
+   embedding: `"ward no. 11"` and `"ward no. 35"` are otherwise identical after
+   stopword removal, and the number is the entire distinction.
+3. **`elapsed_seconds` in the serialised report broke byte-determinism** — my
+   own no-wall-clock rule from Stages 1 and 2, violated. Removed from the
+   report, kept on the result object.
+
+### Files created
+
+```
+src/stage3/{embedding,clustering,stratification,peer_cells,features,
+            deviations,duplicate_detection,explanation,pipeline}.py
+tests/test_stage3.py
+```
+Modified: `src/core/constants.py` (Stage 3 block), `main.py` (Stage 3 section,
+`--stage2-only`). Stages 1 and 2 were **not touched**.
+
+### Stage 4 contract — 21 columns
+
+```
+cluster_id  cluster_size  cluster_is_noise
+log_cost  cost_stratum
+peer_cell_id  peer_cell_size  peer_cell_stable  peer_reference
+duration_days
+deviation_cell_cost(_reason)  deviation_cluster_cost(_reason)
+deviation_spend_ratio(_reason)  deviation_duration(_reason)
+duplicate_score  duplicate_flag  duplicate_group_id
+```
+
+`Stage4.md` §5 defines its cost outlier over `(k,s)` — that is
+`deviation_cell_cost`, already computed here. **Stage 4 should consume it, not
+recompute it.** `duplicate_score` is `Stage3.md` §9.4's `D_max`, which
+`Stage4.md` §8 consumes.
+
+### Known limitations
+
+1. **No cross-lingual synonymy.** TF-IDF will not match "sadak" to "road". On
+   code-mixed registers this is a real gap, accepted in exchange for
+   auditability.
+2. **Duplicate detection has no valid ground truth in this corpus.** Stage 1's
+   duplicate channel clones names from *any* row, so only 70 of 1,000 injected
+   clones land in the same district — and `Stage3.md` §9.1's `1[dᵢ=dⱼ]`
+   deliberately excludes the rest. Precision is therefore validated as a
+   *property* (every group shares a district and is temporally close) and by
+   inspection: all 18 flagged groups are textbook near-duplicates, e.g.
+   `"construction of cc road at village kishanganj, mehsana"` (2015-09-26) and
+   `"renovation of cc road at village kishanganj, mehsana"` (2015-09-27).
+   **Fixing this is Stage 1 generator work** — the channel should clone
+   within-district.
+3. **Cluster quality depends on corpus size** (0.80 at 5k → 0.97 at 50k),
+   because the name vocabulary gets richer. A small register will cluster worse.
+4. **Locality truncation assumes a naming convention.** A register that does not
+   put the place after "at"/"in" loses the benefit, though it loses nothing
+   relative to not truncating.
+5. **`min_cluster_size` counts distinct texts, not records** — a genuinely
+   different unit from `Stage3.md` §6.2's record-level floor, which
+   `CLUSTER_MIN_RECORDS` enforces separately.
+6. **Nothing is calibrated.** `PEER_STAT_MIN_CONFIDENCE`, `PEER_CELL_MIN_SIZE`,
+   the duplicate threshold and τ are defaults, not estimates.
+
+---
+
+## Stage 3 Hardening — calibration, evaluation, reproducibility
+
+**Status: COMPLETE** · **Tests: 158 Stage 3 (109 + 49 new), 581 total, 0 failing**
+
+Purely additive. No clustering, deviation or gating math changed; a test asserts
+the scores are identical with instrumentation on and off.
+
+### 1. Calibration framework
+
+`src/stage3/calibration.py` + `outputs/stage3_calibration_report.json`.
+
+Every parameter is now declared with what it governs, **where it came from**,
+the value used, and what goes wrong if it is wrong. Six of ten carry
+`"source": "default"` — the explicit admission that nobody estimated them.
+
+**Nothing was tuned**, and a test enforces it: every parameter must still equal
+its default.
+
+The distributions those defaults produce are now on paper:
+
+| | value |
+| --- | --- |
+| cluster size | min 518, median 981, max 1,892 (17 clusters) |
+| peer cell size | min 5, median 142, max 951 (108 cells) |
+| stable cells | 71 of 108 (65.7%), covering 78.6% of records |
+| reference records | 86.7% may shape a norm |
+| `deviation_cell_cost` \|p50/p90/p95/p99\| | 0.68 / 1.34 / 1.69 / 11.95 |
+
+That p99 of 11.95 against a p95 of 1.69 is the kind of thing calibration exists
+to notice — a very thin, very heavy tail. The report labels these percentiles
+**descriptive, not thresholds**, because Stage 4 lifting p99 as a flag boundary
+would fit the cut to this corpus.
+
+`ConfigSnapshot` saves the exact parameter set to `artifacts/stage3_config.json`
+and reloads it.
+
+### 2. Duplicate detection is finally measurable
+
+`src/stage3/evaluation.py` + `outputs/stage3_duplicate_eval.json`.
+
+The previous figures (precision 0.047, recall 0.119) were **measuring the wrong
+thing**. Stage 1's duplicate channel clones names from *any* row, so only 70 of
+1,000 injected clones share a district — and `Stage3.md` §9.1's `1[dᵢ=dⱼ]`
+excludes the rest by design. The numbers described a definition mismatch, not
+the detector.
+
+The harness injects duplicates matching the detector's own definition: same
+district, near-identical text (action verb swapped), within 30 days. Measured on
+20,000 records with 300 injected pairs:
+
+| metric | value |
+| --- | --- |
+| **precision** | **0.939** |
+| **recall** | **0.920** |
+| **F1** | **0.929** |
+| injected median score | 0.920 vs corpus median 0.119 |
+
+**`duplicate_id` cannot reach the pipeline.** It is returned as a separate
+object, never a frame column — a structural guarantee rather than a convention,
+asserted by test.
+
+**Deviation from the brief, flagged:** the task said to extend the *Stage 1
+generator*. I built the harness on top of Stage 1 instead. Stage 1 is locked and
+157 tests depend on it, and post-generation injection is strictly stronger — a
+hidden column could still be read by accident, a separate return value cannot.
+
+### 3. Reproducibility contract
+
+`src/stage3/artifacts.py` + `outputs/stage3_reproducibility_report.json`.
+
+```
+artifacts/tfidf_vocab.json     vocabulary + IDF, full precision
+artifacts/cost_strata.json     quantile edges, log and rupee scale
+artifacts/stage3_config.json   parameter snapshot
+```
+
+Default is compute-and-save; **reuse is opt-in**, because silently scoring a new
+corpus against a stale vocabulary is worse than recomputing one. Drift is
+measured (unseen-token rate, stratum-occupancy total-variation distance) and the
+run is **rejected** beyond `MAX_UNSEEN_TOKEN_RATE` (0.35) or `MAX_STRATA_DRIFT`
+(0.35).
+
+**Measured: what freezing does and does not fix.**
+
+| | reproduces? |
+| --- | --- |
+| cost stratum | exactly |
+| cluster partition | exactly — **adjusted Rand index 1.0** |
+| `cluster_label` | exactly |
+| `cluster_id` (integer) | **no** |
+
+`cluster_id` is run-local: HDBSCAN numbers clusters in an order that turns on
+float ties at the 1e-16 level, so the integers permute even when the grouping is
+bit-identical. **`cluster_label` was added to the contract (22 columns) as the
+stable key**, and the reproducibility report says so explicitly.
+
+### Three bugs this work exposed
+
+Instrumentation found defects that a passing test suite had not:
+
+1. **My own artefacts rounded to 10 decimal places.** A reproducibility artefact
+   that rounds does not reproduce: the perturbed IDF shifted the SVD projection
+   enough to move cost strata. Now saved at full precision.
+2. **The duplicate injector misaligned its own ground truth.** Sources were
+   recorded by slicing the candidate array, so skipping one unparseable date
+   silently paired every later duplicate with the wrong original.
+3. **The injector's usability filter used `notna()` on raw string dates**, so
+   Stage 1's deliberate garbage (`"pending"`) passed as a valid date.
+
+### Performance
+
+`run()` measured at **0.838s** with artefact saving and **0.839s** without,
+against a 0.80s pre-hardening baseline — within noise, and far inside
+`Stage3.md` §11's 10s budget. The reproducibility contract costs nothing
+measurable.
+
+### Files added / modified
+
+**Added:** `src/stage3/{calibration,artifacts,evaluation}.py`,
+`tests/test_stage3_hardening.py`.
+**Modified:** `src/core/constants.py` (hardening block),
+`src/stage3/{embedding,stratification,pipeline}.py` (optional parameters only,
+all defaulting to previous behaviour), `README.md`, `roadmap.md`,
+`tests/test_stage3.py` (one assertion widened for the grown report set).
+**Stages 1 and 2 untouched.**
+
+### Known limitations after hardening
+
+1. **Calibration is now possible, not done.** Every default is still a default.
+   The system remains non-operational until fitted to real MPLADS outcomes.
+2. **The duplicate evaluation measures the detector against duplicates it was
+   designed to find.** Real double-claiming may look different — a rewritten
+   description, a split across financial years. The 0.93 F1 is a floor on
+   competence, not a claim about field performance.
+3. **Freezing does not make cluster ids stable**, only the partition and the
+   label. Anything keying on the integer will break across runs.
+4. **Drift thresholds are themselves uncalibrated** (0.35 / 0.35), chosen to be
+   permissive enough not to block legitimate corpus growth.
+5. **Peer norms remain corpus-relative even with frozen artefacts** — a
+   deviation of 2.5 means "unusual against *this* reference population". That is
+   inherent to contextual anomaly detection, not a defect, but it means
+   deviations are not comparable across corpora without pinning the population.
+
+---
+
+## Stages 4–7
 
 Not started. Strict order is enforced: no stage begins until the previous one's
 tests pass.

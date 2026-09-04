@@ -44,6 +44,7 @@ from src.stage2.confidence import (
     attach_confidence,
     confidence_summary_frame,
 )
+from src.stage3.pipeline import STAGE3_COLUMNS, SemanticLayer, attach_structure
 from src.utils.helpers import ensure_dir
 
 LOGGER = get_logger(__name__)
@@ -100,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stop after Stage 1; skip confidence scoring.",
     )
+    parser.add_argument(
+        "--stage2-only",
+        action="store_true",
+        help="Stop after Stage 2; skip peer structure.",
+    )
     return parser
 
 
@@ -132,6 +138,7 @@ def run(
     head_rows: int = DEFAULT_HEAD_ROWS,
     save: bool = True,
     run_stage2: bool = True,
+    run_stage3: bool = True,
 ) -> Corpus:
     """Execute the Stage 1 pipeline and print its reports.
 
@@ -144,6 +151,7 @@ def run(
         head_rows: Rows to preview.
         save: When False, nothing is written to disk.
         run_stage2: Also score evidentiary confidence.
+        run_stage3: Also build peer structure.
 
     Returns:
         The constructed corpus.
@@ -253,8 +261,120 @@ def run(
 
     if run_stage2:
         _run_stage2(corpus, output_dir=output_dir, head_rows=head_rows, save=save)
+        if run_stage3:
+            _run_stage3(
+                corpus, output_dir=output_dir, head_rows=head_rows, save=save
+            )
 
     return corpus
+
+
+def _run_stage3(
+    corpus: Corpus, output_dir: Path, head_rows: int, save: bool
+) -> None:
+    """Build peer structure and print the Stage 3 reports.
+
+    Args:
+        corpus: A corpus already carrying the Stage 2 breakdown.
+        output_dir: Where the Stage 3 artefacts are written.
+        head_rows: How many enriched records to preview.
+        save: When False, nothing is written to disk.
+    """
+    _banner("STAGE 3  SEMANTIC LAYER & PEER CELL FORMATION")
+    result = attach_structure(corpus)
+    report = result.report()
+    records = corpus.records
+
+    print(
+        f"Structured {len(result):,} records in {result.elapsed_seconds:.2f}s; "
+        f"{len(STAGE3_COLUMNS)} contract columns."
+    )
+
+    print("\n--- semantic clusters, labelled by their own top TF-IDF terms ---")
+    print(
+        f"  {report['embedding']['n_unique']} distinct normalised names"
+        f" -> {report['embedding']['n_terms']} terms"
+        f" -> {report['embedding']['n_components']} dims"
+    )
+    sizes = records["cluster_id"].value_counts()
+    for cluster_id, label in sorted(result.clusters.labels.items()):
+        print(f"    {cluster_id:>3}  n={int(sizes.get(cluster_id, 0)):>6,}  {label}")
+    print(f"    unclustered: {report['clustering']['noise_pct']}% of records")
+
+    print("\n--- peer cells: (cluster k) x (cost stratum s) ---")
+    print(
+        f"  {report['peer_cells']['n_cells']} cells,"
+        f" {report['peer_cells']['n_stable_cells']} stable"
+        f" (>= {result.config.peer_cell_min_size} records), covering"
+        f" {report['peer_cells']['stable_record_pct']}% of records"
+    )
+    print(f"  cost strata: {report['stratification']['counts']}")
+
+    print("\n--- confidence gating of the peer norms ---")
+    print(
+        f"  {report['peer_statistics']['reference_record_pct']}% of records may shape"
+        f" a norm (confidence >= {result.config.min_confidence}, usable amounts)"
+    )
+    print(
+        f"  {report['peer_statistics']['usable_cells']} cell(s) carry enough"
+        " high-confidence members to define one"
+    )
+
+    print("\n--- deviations from peer norms (raw material for Stage 4, not scores) ---")
+    for name, entry in report["deviations"]["deviations"].items():
+        print(
+            f"  {name:<24} defined {entry['defined_pct']:>6.2f}%"
+            f"  |p95|={entry['abs_p95']}  {entry['reasons']}"
+        )
+
+    print("\n--- near-duplicate candidates ---")
+    print(
+        f"  {report['duplicates']['n_flagged']} record(s) in"
+        f" {report['duplicates']['n_groups']} group(s)"
+    )
+    grouped = records[records["duplicate_group_id"] >= 0]
+    if len(grouped):
+        first_id = grouped["duplicate_group_id"].iloc[0]
+        example = grouped[grouped["duplicate_group_id"] == first_id]
+        with pd.option_context("display.max_colwidth", 62):
+            print(
+                example[
+                    ["work_name", "district", "date_proposal", "duplicate_score"]
+                ].to_string(index=False)
+            )
+
+    print("\n--- sample enriched records ---")
+    columns = [
+        "work_id",
+        "cluster_id",
+        "cost_stratum",
+        "peer_cell_id",
+        "peer_cell_stable",
+        "peer_reference",
+        "deviation_cell_cost",
+        "deviation_cluster_cost",
+        "duplicate_score",
+    ]
+    print(
+        records.loc[records["peer_cell_stable"], columns]
+        .head(head_rows)
+        .to_string(index=False)
+    )
+
+    if save:
+        ensure_dir(output_dir)
+        for name, path in result.save_reports(output_dir).items():
+            print(f"\n  {name:<20} -> {path}")
+        structure_path = output_dir / "stage3_structure.csv"
+        result.frame.to_csv(structure_path, index=False, lineterminator="\n")
+        print(f"  {'structure':<20} -> {structure_path}")
+    else:
+        print("\n  --no-save: nothing written.")
+
+    print(
+        f"\nStage 3 complete in {result.elapsed_seconds:.2f}s"
+        f" for {len(result):,} records."
+    )
 
 
 def _run_stage2(
@@ -348,6 +468,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             head_rows=args.head,
             save=not args.no_save,
             run_stage2=not args.stage1_only,
+            run_stage3=not (args.stage1_only or args.stage2_only),
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         LOGGER.exception("Stage 1 failed: %s", exc)

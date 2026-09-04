@@ -458,6 +458,140 @@ explain_confidence(corpus.records, 0)["summary"]
 #  and no other component can compensate for it.'
 ```
 
+---
+
+# Stage 3 — Peer Structure: Calibration, Evaluation and Reproducibility
+
+## 1. Calibration Disclaimer
+
+> ### The system is not operational until calibrated on real MPLADS data.
+
+Every Stage 3 threshold is a **default, not an estimate**. Nothing here has been
+fitted to observed outcomes, and several were chosen against a *synthetic*
+corpus whose own defect rates were themselves chosen by a generator.
+
+`outputs/stage3_calibration_report.json` makes each one observable: what it
+governs, where it came from, the value actually used, and what goes wrong if it
+is wrong. Parameters marked `"source": "default"` are the admission that nobody
+estimated them.
+
+| parameter | default | source |
+| --- | --- | --- |
+| `PEER_STAT_MIN_CONFIDENCE` | 0.5 | **default** |
+| `PEER_CELL_MIN_SIZE` | 15 | Stage3.md §8.1 |
+| `PEER_STAT_MIN_REFERENCE` | 8 | **default** |
+| `DUPLICATE_SIMILARITY_THRESHOLD` | 0.85 | **default** |
+| `HDBSCAN_MIN_CLUSTER_SIZE` | 2 | swept against ground truth |
+| `SVD_COMPONENTS` | 16 | swept against ground truth |
+
+The report also carries the distributions those defaults produce — cluster sizes,
+peer-cell sizes, norm coverage per feature, and deviation percentiles. That
+matters more than it sounds: whether `PEER_CELL_MIN_SIZE = 15` is right depends
+on a distribution nobody had looked at. On the reference corpus the median cell
+holds 142 records, so the floor is doing little; on a smaller register it could
+be discarding everything.
+
+**The deviation percentiles are descriptive, not thresholds.** Stage 4 must not
+lift p99 and call it a flag boundary — that fits the cut to whatever happens to
+be in this corpus.
+
+## 2. Duplicate Detection — how it is measured, and what that does not prove
+
+Stage 1's duplicate channel clones work names from *any* row, so only 70 of
+1,000 injected clones land in the same district — and `Stage3.md` §9.1's
+`1[dᵢ = dⱼ]` deliberately excludes the rest. Precision and recall against that
+channel measured the mismatch between two definitions, not the detector.
+Reported earlier as 0.047 / 0.119, those figures were meaningless.
+
+`src/stage3/evaluation.py` injects duplicates matching the detector's own
+definition — **same district, near-identical text, within 30 days** — and
+carries a `duplicate_id` that is returned as a *separate object*, never a frame
+column, so it is structurally impossible for it to reach the pipeline.
+
+Measured on 20,000 records with 300 injected pairs
+(`outputs/stage3_duplicate_eval.json`):
+
+| metric | value |
+| --- | --- |
+| precision | **0.939** |
+| recall | **0.920** |
+| F1 | **0.929** |
+| injected-pair median score | 0.920 vs corpus median 0.119 |
+
+**What this does not prove.** The evaluation measures the detector against
+duplicates *it was designed to find*. Real double-claiming may look different —
+a rewritten description, a split across two financial years, a different
+implementing agency. These numbers are a floor on competence, not a claim about
+field performance.
+
+## 3. Corpus-Relative Behaviour
+
+Stage 3 estimates its feature space from whatever corpus is in front of it: the
+TF-IDF vocabulary, the IDF weights and the cost-strata quantiles all come from
+the data being scored. Three consequences:
+
+1. **The same record can change cost stratum between runs** without changing at
+   all, because the quantile boundaries moved.
+2. **A record's embedding depends on the corpus's vocabulary**, so its cluster
+   can change when the corpus does.
+3. **Peer norms are corpus-relative by construction** — that is intended, since
+   "unusual given similar records" has no meaning without a reference
+   population, but it means a deviation of 2.5 is not comparable across runs
+   unless the reference population is pinned.
+
+For an audit system this is a real defect: a finding must survive being
+re-derived next quarter.
+
+## 4. Reproducibility Contract
+
+Freezing the feature space fixes (1) and (2).
+
+```
+artifacts/tfidf_vocab.json     vocabulary + IDF weights
+artifacts/cost_strata.json     quantile edges, in log and rupee scale
+artifacts/stage3_config.json   the exact parameter set used
+```
+
+**Default is compute-and-save. Reuse is opt-in** — silently scoring a new corpus
+against a stale vocabulary is worse than recomputing one.
+
+```python
+SemanticLayer(SemanticConfig(reuse_artifacts=True)).run(corpus)
+```
+
+Freezing the vocabulary alone would not be enough: IDF is re-estimated from
+document frequencies, so the same token would carry a different weight on a
+different corpus. Both are frozen, at full precision — an artefact that exists
+to reproduce a run must not round.
+
+**Drift is measured and the run is gated on it**
+(`outputs/stage3_reproducibility_report.json`): unseen-token rate against the
+frozen vocabulary, and total-variation distance between the frozen and observed
+stratum occupancies. Beyond `MAX_UNSEEN_TOKEN_RATE` (35%) or `MAX_STRATA_DRIFT`
+(0.35) the run is **rejected**, because a corpus the frozen space cannot
+describe would embed as near-zero vectors, cluster as noise, and silently lose
+every peer cell. Failing loudly is the correct response.
+
+### What reuse reproduces, and what it does not
+
+Measured by re-running the same corpus against frozen artefacts:
+
+| | reproduces? |
+| --- | --- |
+| cost stratum | **exactly** |
+| cluster *partition* | **exactly** — adjusted Rand index 1.0 |
+| `cluster_label` | **exactly** |
+| `cluster_id` (the integer) | **no** |
+
+`cluster_id` is **run-local**. HDBSCAN numbers clusters in an order that turns
+on floating-point ties at the 1e-16 level, so the integers permute even when the
+grouping is bit-identical.
+
+> **Downstream code that must survive across runs keys on `cluster_label`,
+> never on `cluster_id`.**
+
+`cluster_label` is part of the Stage 4 column contract for exactly this reason.
+
 ## Limitations
 
 * No beneficial ownership → no true collusion detection

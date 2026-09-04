@@ -640,3 +640,255 @@ RECON_OVERSPEND_TOLERANCE: Final[float] = 0.05
 #: not a number this system should reason about - it is a data-entry accident.
 #: Refused on the same terms as an infinity.
 RECON_IMPLAUSIBLE_MAGNITUDE_CREDIT: Final[float] = 0.0
+
+# ===========================================================================
+# STAGE 3 - Semantic Layer & Peer Cell Formation
+#
+# Builds the comparison groups every downstream signal is measured against.
+# Stage 3 computes STRUCTURE and DEVIATIONS; it does not score or classify
+# anomalies - that is Stage 4's responsibility.
+# ===========================================================================
+
+STAGE3_VERSION: Final[str] = "stage3.peer.v1"
+
+#: Single seed for every seeded operation in Stage 3 (currently only the
+#: truncated SVD solver). HDBSCAN and TF-IDF are already deterministic.
+STAGE3_SEED: Final[int] = 42
+
+# --- text normalisation ----------------------------------------------------
+
+#: Action verbs and connectives stripped before embedding. A repaired road and
+#: a constructed road are the same KIND of work, so the action must not drive
+#: the clustering.
+STAGE3_BOILERPLATE_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "construction", "constn", "repair", "renovation", "upgradation",
+        "installation", "extension", "providing", "fixing", "strengthening",
+        "improvement", "development", "supply", "provision",
+        "of", "and", "at", "in", "on", "the", "for", "to", "by", "with",
+        "work", "works", "phase", "unit", "i", "ii", "iii", "no",
+    }
+)
+
+#: Locality markers. These prefix a place name and carry no work-type meaning.
+STAGE3_LOCALITY_TOKENS: Final[frozenset[str]] = frozenset(
+    {"ward", "village", "gram", "panchayat", "sector", "block", "nagar", "puram"}
+)
+
+#: Delimiters introducing the LOCATION clause of a work name.
+#:
+#: Public-works names follow "<action> <work type> at <locality>, <district>".
+#: Everything from the delimiter onward names a place, not a kind of work.
+#:
+#: Truncating there is not a nicety. Measured without it, village names
+#: survived normalisation and split single work types across several clusters -
+#: "check dam" became one cluster for Peddapalli and another for Nandgaon - so
+#: geography was silently becoming a grouping feature, which is precisely what
+#: the grouping/testing separation forbids. Noise also ran at 28.4%.
+#:
+#: District and state stripping (below) cannot catch this: village names appear
+#: nowhere in the district or state columns, and in a register where localities
+#: are spread evenly across districts no statistical test distinguishes them
+#: from work-type tokens either. Position is the signal, so position is used.
+STAGE3_LOCALITY_DELIMITERS: Final[tuple[str, ...]] = (
+    " at ",
+    " in ",
+    " near ",
+    " opposite ",
+    " opp ",
+    " behind ",
+    " adjacent to ",
+)
+
+#: Whether to truncate a work name at its first locality delimiter.
+STAGE3_TRUNCATE_AT_LOCALITY: Final[bool] = True
+
+#: Whether to strip every district and state name found in the corpus.
+#:
+#: NOT cosmetic. Every work_name in an MPLADS-style register ends with its
+#: district. Left in, TF-IDF clusters by geography, and district-level
+#: anomalies are normalised out of existence before Stage 4 can see them. The
+#: grouping features must stay disjoint from the testing features.
+STAGE3_STRIP_GEOGRAPHY: Final[bool] = True
+
+# --- embedding -------------------------------------------------------------
+
+TFIDF_NGRAM_RANGE: Final[tuple[int, int]] = (1, 2)
+TFIDF_MIN_DF: Final[int] = 1
+TFIDF_SUBLINEAR_TF: Final[bool] = True
+
+#: Truncated-SVD width for the clustering projection.
+#:
+#: Measured against generator ground truth at min_cluster_size = 3: 8 dims gave
+#: 0.704 weighted purity at 20k, 16 gave 0.924; 24 and above collapse into 27-41%
+#: noise. HDBSCAN's density estimate degrades sharply with dimension, so 16 is
+#: the measured optimum, not a guess.
+#:
+#: The sparse TF-IDF matrix is retained alongside the projection: duplicate
+#: detection and per-cluster top-term labels both read it, so token-level
+#: interpretability survives the reduction.
+SVD_COMPONENTS: Final[int] = 16
+
+# --- clustering ------------------------------------------------------------
+
+#: HDBSCAN operates on UNIQUE normalised texts, not on records.
+#:
+#: Public-works names are heavily templated. After locality truncation, 20,000
+#: records reduce to 91 distinct normalised strings and 50,000 to 184.
+#: Clustering the distinct strings and broadcasting labels back runs in well
+#: under a second where clustering records took 5.0s at 20k and 27.0s at 50k -
+#: inside Stage3.md sec.11's 10s budget instead of 2.7x over it.
+#:
+#: It is also the better statistics. Identical text must receive an identical
+#: cluster regardless, and collapsing duplicates removes the artificial density
+#: spikes that templated naming creates in a density-based algorithm.
+#:
+#: NOTE the unit: this counts distinct TEXTS, not records. Stage3.md sec.6.2's
+#: min_cluster_size = 20 is a record count; CLUSTER_MIN_RECORDS enforces that
+#: separately.
+#:
+#: Chosen by sweep against generator ground truth, at four corpus sizes.
+#: Weighted purity is over clustered records; noise is the share left
+#: unclustered, and those records get no usable peer cell at all:
+#:
+#:      n      mcs=2 (k/noise/purity)     mcs=3 (k/noise/purity)
+#:    5,000     13 / 11.2% / 0.802         5 / 64.9% / 0.916
+#:   10,000     16 /  5.0% / 0.819         9 / 32.9% / 0.688
+#:   20,000     17 /  7.6% / 0.924        17 /  7.6% / 0.924
+#:   50,000     17 / 18.3% / 0.972        17 /  5.0% / 0.917
+#:
+#: 2 is selected. On the product of coverage and purity - the share of records
+#: landing in a cluster that is actually correct - it wins at three of the four
+#: sizes (0.712/0.778/0.854/0.794 against 0.321/0.462/0.854/0.871) and is far
+#: more stable at small corpus sizes, where mcs=3 collapses to 65% noise.
+#:
+#: 2 is also the semantically right floor. After locality truncation, distinct
+#: texts ARE distinct work types plus their typo variants, so two distinct
+#: spellings of "borewell with hand pump" is sufficient evidence that such a
+#: work type exists.
+HDBSCAN_MIN_CLUSTER_SIZE: Final[int] = 2
+
+#: Clusters holding fewer than this many RECORDS are merged into the nearest
+#: retained cluster by centroid cosine (Stage3.md sec.6.4).
+CLUSTER_MIN_RECORDS: Final[int] = 30
+
+#: Label for records HDBSCAN could not place (Stage3.md sec.6.3).
+NOISE_CLUSTER_ID: Final[int] = -1
+
+#: Top TF-IDF terms kept per cluster as its human-readable label.
+CLUSTER_LABEL_TERMS: Final[int] = 4
+
+# --- cost stratification ---------------------------------------------------
+
+#: Quantile bins over log(sanction_amount + 1), per Stage3.md sec.7.3 option A.
+COST_STRATA_BINS: Final[int] = 5
+
+#: Stratum for a record whose sanctioned amount is absent or unusable.
+MISSING_STRATUM: Final[int] = -1
+
+# --- peer cells ------------------------------------------------------------
+
+#: Minimum records in a peer cell before its statistics may be trusted
+#: (Stage3.md sec.8.1).
+PEER_CELL_MIN_SIZE: Final[int] = 15
+
+# --- peer statistics (confidence gating) -----------------------------------
+
+#: Minimum Stage 2 confidence for a record to contribute to a peer norm.
+#:
+#: A cell's median and MAD are the yardstick every member is judged against. A
+#: record with an unreadable amount or a fabricated timeline must not bend that
+#: yardstick, because the corruption then propagates to every honest record in
+#: the cell. Gated records are still ASSIGNED a cell and still MEASURED against
+#: the clean norm - they are the REMEDIATE population - they simply get no vote
+#: on what normal looks like.
+PEER_STAT_MIN_CONFIDENCE: Final[float] = 0.5
+
+#: Reconciliation branches barred from the statistics basis outright: their
+#: amounts are not numbers this system should reason about.
+PEER_STAT_EXCLUDED_BRANCHES: Final[tuple[str, ...]] = (
+    "non_finite",
+    "implausible_magnitude",
+)
+
+#: Minimum high-confidence members required before a peer norm is computed at
+#: all. A 15-record cell with two usable members cannot define a median.
+PEER_STAT_MIN_REFERENCE: Final[int] = 8
+
+#: Consistency constant making MAD a consistent estimator of sigma under
+#: normality. Median + MAD tolerate up to 50% contamination (README sec.2),
+#: which mean and standard deviation do not.
+MAD_SCALE: Final[float] = 1.4826
+
+# --- duplicate detection ---------------------------------------------------
+
+#: Cosine similarity above which two work names are near-duplicates.
+DUPLICATE_SIMILARITY_THRESHOLD: Final[float] = 0.85
+
+#: Temporal decay for the Stage3.md sec.9.1 duplicate score, in days.
+DUPLICATE_TAU_DAYS: Final[float] = 180.0
+
+#: Largest block compared pairwise. Blocking on (cluster, district) keeps the
+#: comparison O(N*b) rather than O(N^2); this caps the worst block.
+DUPLICATE_MAX_BLOCK: Final[int] = 600
+
+# --- performance -----------------------------------------------------------
+
+#: Stage3.md sec.11: 50k records processed in under 10 seconds.
+STAGE3_SECONDS_BUDGET: Final[float] = 10.0
+
+# ===========================================================================
+# STAGE 3 HARDENING - calibration, evaluation and reproducibility
+#
+# Purely additive infrastructure. None of these values changes a score: they
+# make the existing behaviour observable, measurable and repeatable.
+# ===========================================================================
+
+ARTIFACT_DIR: Final[Path] = PROJECT_ROOT / "artifacts"
+
+TFIDF_VOCAB_FILE: Final[str] = "tfidf_vocab.json"
+COST_STRATA_FILE: Final[str] = "cost_strata.json"
+STAGE3_CONFIG_SNAPSHOT_FILE: Final[str] = "stage3_config.json"
+
+STAGE3_CALIBRATION_REPORT: Final[str] = "stage3_calibration_report.json"
+STAGE3_DUPLICATE_EVAL_REPORT: Final[str] = "stage3_duplicate_eval.json"
+STAGE3_REPRODUCIBILITY_REPORT: Final[str] = "stage3_reproducibility_report.json"
+
+#: Percentiles reported for every deviation distribution. These are diagnostic
+#: only - Stage 3 does not threshold on them, and Stage 4 must not inherit them
+#: as thresholds without calibrating first.
+DEVIATION_PERCENTILES: Final[tuple[int, ...]] = (50, 90, 95, 99)
+
+#: Share of a new corpus's tokens that may be absent from a frozen vocabulary
+#: before the run is rejected.
+#:
+#: Beyond this the frozen feature space no longer describes the new data:
+#: records would be embedded largely as zero vectors, cluster as noise, and
+#: silently lose their peer cells. Failing loudly is the correct response.
+MAX_UNSEEN_TOKEN_RATE: Final[float] = 0.35
+
+#: Share of records that may fall outside the frozen strata's occupancy profile
+#: before the run is rejected. Measured as total variation distance between the
+#: recorded and observed bin occupancies.
+MAX_STRATA_DRIFT: Final[float] = 0.35
+
+#: Reproducibility artefacts are WRITTEN by default and REUSED only on request.
+#: Silently reusing a stale vocabulary would be far worse than recomputing one.
+STAGE3_REUSE_ARTIFACTS_DEFAULT: Final[bool] = False
+STAGE3_SAVE_ARTIFACTS_DEFAULT: Final[bool] = True
+
+# --- duplicate evaluation harness (test-only) ------------------------------
+
+#: Injected duplicate pairs share a district and sit within this many days of
+#: each other, matching Stage3.md sec.9.1's 1[d_i=d_j] and exp(-|dt|/tau).
+EVAL_DUPLICATE_MAX_DAY_GAP: Final[int] = 30
+
+#: Action verbs swapped in to make an injected duplicate a NEAR duplicate
+#: rather than a byte-identical copy - the realistic case, and the harder one.
+EVAL_DUPLICATE_ACTIONS: Final[tuple[str, ...]] = (
+    "Construction of",
+    "Renovation of",
+    "Repair of",
+    "Improvement of",
+    "Upgradation of",
+)

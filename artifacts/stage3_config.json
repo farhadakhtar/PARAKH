@@ -1,0 +1,15 @@
+{
+  "parameters": {
+    "cluster_min_records": 30,
+    "cost_bins": 5,
+    "duplicate_tau_days": 180.0,
+    "duplicate_threshold": 0.85,
+    "min_cluster_size": 2,
+    "min_confidence": 0.5,
+    "min_reference": 8,
+    "n_components": 16,
+    "peer_cell_min_size": 15,
+    "seed": 42
+  },
+  "stage3_version": "stage3.peer.v1"
+}
