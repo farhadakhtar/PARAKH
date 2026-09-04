@@ -93,6 +93,9 @@ STAGE3_COLUMNS: Tuple[str, ...] = (
     "cluster_label",
     "cluster_size",
     "cluster_is_noise",
+    # AUDIT M1: the noise cluster no longer defines a norm, so downstream
+    # code can tell "measured against a real peer group" from "no group".
+    "cluster_has_norm",
     # --- scale -------------------------------------------------------------
     "log_cost",
     "cost_stratum",
@@ -106,12 +109,16 @@ STAGE3_COLUMNS: Tuple[str, ...] = (
     # --- deviations (raw material for Stage 4; NOT scores) -----------------
     "deviation_cell_cost",
     "deviation_cell_cost_reason",
+    "deviation_cell_cost_bucket",
     "deviation_cluster_cost",
     "deviation_cluster_cost_reason",
+    "deviation_cluster_cost_bucket",
     "deviation_spend_ratio",
     "deviation_spend_ratio_reason",
+    "deviation_spend_ratio_bucket",
     "deviation_duration",
     "deviation_duration_reason",
+    "deviation_duration_bucket",
     # --- duplicates --------------------------------------------------------
     "duplicate_score",
     "duplicate_flag",
@@ -462,6 +469,9 @@ class SemanticLayer:
         )
         output["cluster_size"] = clusters.cluster_size
         output["cluster_is_noise"] = clusters.is_noise
+        output["cluster_has_norm"] = clusters.cluster_id.map(
+            lambda value: statistics.cluster_has_norm(int(value))
+        ).astype(bool)
         output["log_cost"] = stratification.log_cost
         output["cost_stratum"] = stratification.cost_stratum
         output["peer_cell_id"] = peer_cells.peer_cell_id

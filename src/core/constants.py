@@ -892,3 +892,385 @@ EVAL_DUPLICATE_ACTIONS: Final[tuple[str, ...]] = (
     "Improvement of",
     "Upgradation of",
 )
+
+# ===========================================================================
+# STAGE 3 AUDIT REMEDIATION
+#
+# Four correctness fixes from the Stage 3 deep audit. None changes a formula,
+# a clustering decision or a threshold that was already load-bearing: they
+# close guard gaps and make existing behaviour legible.
+# ===========================================================================
+
+#: Reason recorded when a deviation is undefined because the record's cluster
+#: is the noise pool.
+#:
+#: AUDIT M1. form_peer_cells forces noise CELLS unstable, but the cluster-level
+#: statistics path had no equivalent guard, so cluster -1 was emitting a median
+#: and MAD pooled from records HDBSCAN judged similar to nothing. Measured on
+#: the 20k corpus: 1,331 reference records, MAD 0.803 against 0.499 for a
+#: typical real cluster - 61% wider, so every noise record was systematically
+#: compressed toward zero and under-flagged. Noise is now barred from defining
+#: a norm, and its records carry this reason rather than the generic
+#: "no_peer_norm".
+DEVIATION_REASON_CLUSTER_NOISE: Final[str] = "cluster_noise"
+
+#: |z| above which a deviation is marked extreme.
+#:
+#: AUDIT M4. Deviations are NOT clipped - a 1e300 sanction genuinely is
+#: thousands of MADs from its peers, and hiding that would be the silent
+#: corruption Stage 1 exists to prevent. But Stage 4 inherits a distribution
+#: whose maximum is 255x its own p99, so any magnitude-weighted aggregation
+#: would be decided by 22 records. The flag lets Stage 4 see the tail coming
+#: without Stage 3 destroying information.
+Z_EXTREME_THRESHOLD: Final[float] = 20.0
+
+#: |z| above which a deviation is marked high but not yet extreme.
+Z_HIGH_THRESHOLD: Final[float] = 5.0
+
+#: Magnitude buckets, in ascending severity. "undefined" is a distinct bucket
+#: rather than a missing value, so the NaN-carries-a-reason rule holds here too.
+DEVIATION_BUCKETS: Final[tuple[str, ...]] = ("undefined", "normal", "high", "extreme")
+
+# --- duplicate evaluation: real perturbations (AUDIT M2) -------------------
+
+#: AUDIT M2. The previous harness perturbed only the ACTION VERB - and action
+#: verbs are stopwords in normalize_work_text, so the perturbation was erased
+#: before the detector ever saw it. Verified: 60/60 injected pairs were
+#: byte-identical in the detector's own text view, which means the reported
+#: F1 of 0.929 measured EXACT-MATCH RETRIEVAL, not near-duplicate detection.
+#: That figure is withdrawn.
+#:
+#: These perturbations act on tokens that SURVIVE preprocessing, so the
+#: duplicate is genuinely a near match rather than a copy.
+
+#: Synonym pairs among surviving content tokens.
+EVAL_TOKEN_SWAPS: Final[tuple[tuple[str, str], ...]] = (
+    ("centre", "center"),
+    ("block", "blk"),
+    ("road", "rd"),
+    ("building", "bldg"),
+    ("light", "lamp"),
+    ("tank", "tanks"),
+    ("line", "lines"),
+    ("shelter", "stand"),
+)
+
+#: Fractional amount jitter applied to an injected duplicate, as a realistic
+#: re-estimate rather than a copy of the sanctioned figure.
+EVAL_AMOUNT_JITTER: Final[tuple[float, float]] = (0.05, 0.20)
+
+#: Perturbation kinds cycled over injected duplicates. Every one of them
+#: survives preprocessing, which is the whole point.
+EVAL_PERTURBATIONS: Final[tuple[str, ...]] = ("typo", "swap", "truncate")
+
+# ===========================================================================
+# STAGE 4 - Contextual Anomaly Interpretation
+#
+# Stage 4 recomputes nothing. It consumes Stage 2 confidence and Stage 3 peer
+# deviations, decides what they MEAN, and routes.
+#
+# SCOPE NOTE (recorded, not resolved silently): Stage4.md excludes "Final risk
+# scoring" and "Routing decisions"; Stage5.md owns R(r) and Stage6.md owns the
+# INVESTIGATE/REMEDIATE/MONITOR/CLEAR routing. The implementation brief for
+# this stage requires both here. Containment: the score is named SEVERITY, not
+# risk, and the decision uses INSUFFICIENT_CONTEXT rather than Stage 6's CLEAR,
+# so neither downstream stage's output is pre-empted or overwritten.
+# ===========================================================================
+
+STAGE4_VERSION: Final[str] = "stage4.anomaly.v1"
+
+# --- confidence gating (the core PARAKH rule) ------------------------------
+
+#: Confidence below which a record may never be escalated to INVESTIGATE.
+#:
+#: README sec.8: "The system never emits a fraud hypothesis on low-confidence
+#: evidence." A record under this line is routed to REMEDIATE whatever its
+#: deviations look like - the deviations are not erased, they are simply not
+#: allowed to mean "fraud" until the evidence supporting them is fixed.
+#:
+#: Matches PEER_STAT_MIN_CONFIDENCE by construction: a record that was not
+#: trusted to SHAPE a peer norm is not trusted to be ACCUSED by one either.
+CONFIDENCE_GATE_THRESHOLD: Final[float] = PEER_STAT_MIN_CONFIDENCE
+
+# --- deviation thresholds --------------------------------------------------
+
+#: |z| at which a deviation earns an anomaly TYPE.
+#:
+#: 3.0 robust MADs. Under normality that is roughly a 0.3% two-tailed tail, but
+#: the distribution here is not normal and this is not a calibrated false-
+#: positive rate - it is a starting judgement, like every other Stage 3/4
+#: parameter. Stage 3's calibration report carries the observed percentiles
+#: (cell cost: p95 1.69, p99 11.95) and explicitly forbids adopting them as
+#: thresholds without calibration against real outcomes.
+Z_TYPE_THRESHOLD: Final[float] = 3.0
+
+#: |z| at which a high-confidence record is escalated to INVESTIGATE. Set above
+#: the type threshold so that being unusual enough to NAME is deliberately a
+#: lower bar than being unusual enough to ACCUSE.
+Z_INVESTIGATE_THRESHOLD: Final[float] = 3.5
+
+#: Divisor mapping |z| into [0,1] for severity. |z| >= this contributes fully.
+Z_SEVERITY_SCALE: Final[float] = 5.0
+
+# --- severity composition --------------------------------------------------
+
+#: Weights over the four signals. Duplicate is deliberately the smallest: the
+#: brief and Stage3.md both treat it as supporting evidence only, and Stage 3's
+#: own evaluation measured ~1% recall on realistic near-duplicates, so it is
+#: nowhere near strong enough to drive a decision.
+#:
+#: Weights are renormalised over the VALID signals of each record, so a record
+#: missing its duration signal is scored on what it has rather than penalised
+#: or credited for what it lacks.
+SEVERITY_WEIGHTS: Final[Mapping[str, float]] = {
+    "cost": 0.45,
+    "spend": 0.30,
+    "duration": 0.15,
+    "duplicate": 0.10,
+}
+
+# --- vocabularies ----------------------------------------------------------
+
+#: Anomaly types. A record may carry several; they are not mutually exclusive
+#: and severity never overrides them.
+ANOMALY_TYPES: Final[tuple[str, ...]] = (
+    "cost_outlier",
+    "overspend_anomaly",
+    "underspend_anomaly",
+    "temporal_outlier",
+    "duplicate_suspect",
+    "low_confidence",
+    "insufficient_context",
+)
+
+#: Provisional triage classes. Stage 6 owns the final routing and may supersede
+#: these; INSUFFICIENT_CONTEXT is used in place of Stage 6's CLEAR so the two
+#: vocabularies never get conflated.
+DECISION_CLASSES: Final[tuple[str, ...]] = (
+    "INVESTIGATE",
+    "REMEDIATE",
+    "MONITOR",
+    "INSUFFICIENT_CONTEXT",
+)
+
+#: Which cost deviation was used, in preference order.
+COST_SCOPES: Final[tuple[str, ...]] = ("cell", "cluster", "none")
+
+#: Stage 2 lifecycle labels that mean "the money should already have been
+#: spent", so a low execution rate genuinely contradicts the record.
+#:
+#: Stage 2 emits "terminal"; the brief says "completed". Both are accepted so a
+#: vocabulary difference between the two documents cannot silently disable the
+#: underspend gate.
+LIFECYCLE_TERMINAL_STATES: Final[tuple[str, ...]] = ("terminal", "completed", "closed")
+
+#: Lifecycle labels at which low spend is expected and must NOT be an anomaly.
+LIFECYCLE_PRE_COMPLETION_STATES: Final[tuple[str, ...]] = (
+    "pre_completion",
+    "proposed",
+    "approved",
+    "pending",
+    "ongoing",
+)
+
+#: The deviation-derived signals counted by valid_signal_count. The duplicate
+#: signal is excluded on purpose: it is supporting evidence, and letting it
+#: satisfy the "has context" test would let a record with no peer comparison at
+#: all escape the insufficient_context finding.
+CORE_SIGNALS: Final[tuple[str, ...]] = ("cost", "spend", "duration")
+
+STAGE4_ANOMALY_REPORT: Final[str] = "stage4_anomaly_report.json"
+
+
+# ===========================================================================
+# Stage 4 hardening - measurement, exposure and contract completion
+#
+# Nothing in this block influences a Stage 4 decision. Every constant here
+# exists so that a judgement already being made can be SEEN. The z thresholds,
+# severity weights and the confidence gate above remain uncalibrated
+# judgements; this block is what makes calibrating them possible later.
+# ===========================================================================
+
+#: Quantiles reported for every distribution in the Stage 4 calibration report.
+#: Fixed rather than configurable so two reports are always comparable.
+CALIBRATION_QUANTILES: Final[tuple[float, ...]] = (0.50, 0.75, 0.90, 0.95, 0.99)
+
+#: Why a record has no severity. Exhaustive and mutually exclusive: exactly one
+#: applies to every record, so "no severity" is never an unexplained gap.
+SEVERITY_DEFINED_REASONS: Final[tuple[str, ...]] = (
+    "ok",
+    "no_peer_norm",
+    "cluster_noise",
+    "no_valid_deviation",
+    "insufficient_features",
+)
+
+#: Stage 3 deviation reasons that mean "a peer norm could not be established",
+#: as opposed to "this record lacks the input". The distinction matters: the
+#: first is a corpus-structure problem, the second is a data-quality problem,
+#: and they are fixed by different people.
+PEER_NORM_ABSENT_REASONS: Final[tuple[str, ...]] = (
+    "cell_unstable",
+    "no_peer_norm",
+    "zero_dispersion",
+)
+
+#: Stage 3's reason for "the record does not carry the underlying value".
+FEATURE_MISSING_REASON: Final[str] = "feature_missing"
+
+#: Stage 3's reason for "this record is in the noise cluster".
+CLUSTER_NOISE_REASON: Final[str] = "cluster_noise"
+
+# --- duplicate observability ----------------------------------------------
+#
+# DUPLICATE_SIMILARITY_THRESHOLD (0.85) above is the DETECTION threshold and is
+# not touched here. The constants below only describe what the detector can
+# see, so that its ~1% measured recall can be attributed rather than guessed at.
+
+#: Raw cosine at which a pair is considered *reachable* - within sight of the
+#: detector had nothing else attenuated it. Well below the detection threshold
+#: on purpose: the gap between reachable and flagged is the diagnostic.
+DUPLICATE_REACHABLE_THRESHOLD: Final[float] = 0.60
+
+#: Cosine cut points reported in the duplicate diagnostics, ascending.
+DUPLICATE_DIAGNOSTIC_THRESHOLDS: Final[tuple[float, ...]] = (
+    0.60,
+    0.70,
+    0.80,
+    0.85,
+    0.90,
+)
+
+STAGE4_CALIBRATION_REPORT: Final[str] = "stage4_calibration.json"
+STAGE4_DUPLICATE_DIAGNOSTICS: Final[str] = "stage4_duplicate_diagnostics.json"
+
+
+# ===========================================================================
+# Stage 5 - Risk Scoring Layer
+#
+# Stage 4 says what deviates and how far. Stage 5 says how much that is worth
+# acting on, GIVEN how much the record can be trusted. It labels nothing as
+# fraud: a risk score is an estimate under uncertainty, not an accusation.
+#
+# Every constant here is a JUDGEMENT, not an estimate. None is fitted to a
+# distribution, and the Stage 5 calibration report exists precisely so that
+# these numbers can be argued with rather than assumed.
+# ===========================================================================
+
+STAGE5_VERSION: Final[str] = "stage5.risk.v1"
+
+# --- step 1: signal strength (WHAT is wrong) -------------------------------
+#
+# Severity is the base. The three boosts fill the REMAINING headroom above it
+# (`base + (1 - base) * boost`), which keeps the result in [0,1], keeps it
+# strictly increasing in severity, and means no boost can ever lower a score.
+
+#: Weight given to anomaly breadth - several distinct findings on one record
+#: are worth more than one, but never more than the severity itself.
+RISK_BREADTH_WEIGHT: Final[float] = 0.20
+
+#: Weight given to the extreme-magnitude bucket. A z of 30 and a z of 4 both
+#: saturate Stage 4's severity; this restores part of that lost ordering.
+RISK_EXTREME_WEIGHT: Final[float] = 0.30
+
+#: Weight given to a flagged near-duplicate. Capped at 0.10 by the brief and
+#: by Stage 3's own measured ~1% recall: it may support a case, never make one.
+RISK_DUPLICATE_WEIGHT: Final[float] = 0.10
+
+#: Anomaly types that count toward breadth. `low_confidence` is excluded
+#: because it is a statement about the EVIDENCE, not about the work, and it is
+#: already priced in the data-quality term; counting it in both places would
+#: penalise a record twice for one defect. `insufficient_context` is excluded
+#: for the same reason via the uncertainty term.
+RISK_BREADTH_TYPES: Final[tuple[str, ...]] = (
+    "cost_outlier",
+    "overspend_anomaly",
+    "underspend_anomaly",
+    "temporal_outlier",
+    "duplicate_suspect",
+)
+
+#: Breadth saturates here: three simultaneous findings is already "broad".
+RISK_BREADTH_SATURATION: Final[int] = 3
+
+# --- step 2: data quality (CAN we trust it) --------------------------------
+
+#: Below this, a record cannot carry a risk score at all. Same value as the
+#: Stage 4 gate and Stage 3's PEER_STAT_MIN_CONFIDENCE, deliberately: a record
+#: not trusted to shape a norm, or to be escalated, is not trusted to be
+#: scored either.
+MIN_CONFIDENCE_FOR_RISK: Final[float] = PEER_STAT_MIN_CONFIDENCE
+
+#: Decay rate on critical_deficit. Stage 2 charges roughly 0.8 per missing
+#: critical field, so k = 0.5 makes one missing critical field cost about a
+#: third of the record's quality. A judgement about how much a missing date or
+#: amount should matter - stated so it can be disputed.
+RISK_CRITICAL_DEFICIT_DECAY: Final[float] = 0.5
+
+#: Quality ceiling for a record whose dates are internally impossible. Not 0:
+#: the record still exists and its other evidence is still readable. Near-zero
+#: because a corpus that cannot order its own events cannot support a finding.
+RISK_TEMPORAL_HARD_FAIL_QUALITY: Final[float] = 0.05
+
+#: Multiplier applied when confidence sits below the gate. Such records never
+#: receive a risk score, so this only shapes the reported COMPONENT - it exists
+#: so the component stays meaningful for the records the gate excludes.
+RISK_LOW_CONFIDENCE_PENALTY: Final[float] = 0.25
+
+# --- step 3: uncertainty (HOW stable is the judgement) ---------------------
+#
+# Additive contributions, clipped into [0,1]. Undefined severity alone
+# saturates: if the central quantity could not be computed, nothing about the
+# record is stable.
+
+#: No severity at all - nothing to be uncertain around.
+RISK_UNCERTAINTY_NO_SEVERITY: Final[float] = 1.0
+
+#: The work type carries no norm, so there is no baseline to deviate from.
+RISK_UNCERTAINTY_NO_NORM: Final[float] = 0.60
+
+#: The peer cell is too small to be relied on, though a coarser norm exists.
+RISK_UNCERTAINTY_UNSTABLE_CELL: Final[float] = 0.25
+
+#: Weight on missing signal coverage: a judgement resting on one of three
+#: possible comparisons is less stable than one resting on all three.
+RISK_UNCERTAINTY_COVERAGE_WEIGHT: Final[float] = 0.30
+
+#: A record flagged as a duplicate that the detector could not actually have
+#: seen. PROVABLY IMPOSSIBLE while Stage 4 holds - the temporal decay lies in
+#: [0,1], so a blended score above the detection threshold implies a cosine
+#: above the reachability cut. Implemented and measured anyway: if it ever
+#: fires, Stage 3 and Stage 4 have diverged and the risk should say so.
+RISK_UNCERTAINTY_UNREACHABLE_DUPLICATE: Final[float] = 0.40
+
+# --- step 5: risk bands ----------------------------------------------------
+#
+# NOT tuned. Round numbers on the [0,1] scale, chosen before the distribution
+# was looked at, and left alone afterwards. The calibration report states what
+# they actually select; if that turns out to be uncomfortable, the honest move
+# is to argue about the number in the open, not to slide it.
+
+#: At or above: high risk.
+R_HIGH: Final[float] = 0.50
+
+#: At or above (and below R_HIGH): moderate risk. Below: low risk.
+R_LOW: Final[float] = 0.20
+
+#: Why a record has no risk score. Exhaustive and mutually exclusive.
+RISK_UNDEFINED_REASONS: Final[tuple[str, ...]] = (
+    "ok",
+    "severity_undefined",
+    "confidence_below_gate",
+    "no_cluster_norm",
+)
+
+#: Mutually exclusive risk bands. These are NOT decisions - Stage 6 routes.
+RISK_FLAGS: Final[tuple[str, ...]] = (
+    "high_risk",
+    "moderate_risk",
+    "low_risk",
+    "insufficient_data",
+)
+
+STAGE5_RISK_REPORT: Final[str] = "stage5_risk_report.json"
+STAGE5_CALIBRATION_REPORT: Final[str] = "stage5_calibration.json"

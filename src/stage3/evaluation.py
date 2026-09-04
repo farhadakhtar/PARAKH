@@ -22,9 +22,23 @@ so it is structurally impossible for it to reach the pipeline - a guarantee a
 hidden column could only offer by convention. A test asserts the frame handed
 to Stage 3 carries no such column.
 
-Injected duplicates are *near* duplicates, not copies: the action verb is
-swapped and the date shifted, because a detector that only catches byte
-identity would be worthless on real registers.
+The correction (AUDIT M2)
+-------------------------
+The first version of this harness perturbed only the **action verb**. Action
+verbs are stopwords in ``normalize_work_text``, so the perturbation was
+erased before the detector ever saw it. Verified afterwards: **60 of 60**
+injected pairs were byte-identical in the detector's own text view.
+
+    The previously reported F1 of 0.929 was INVALID. It measured
+    exact-match retrieval, not near-duplicate detection, and is withdrawn.
+
+Perturbations now act on tokens that **survive** preprocessing - a typo
+inside a content word, a synonym swap, or a dropped token - so the injected
+duplicate is genuinely a near match. ``assert_perturbations_are_real``
+checks this property directly rather than trusting it, and the test suite
+asserts cosine similarity is strictly below 1.0.
+
+The detector itself is untouched.
 """
 
 from __future__ import annotations
@@ -37,12 +51,16 @@ import numpy as np
 import pandas as pd
 
 from src.core.constants import (
+    EVAL_AMOUNT_JITTER,
     EVAL_DUPLICATE_ACTIONS,
     EVAL_DUPLICATE_MAX_DAY_GAP,
+    EVAL_PERTURBATIONS,
+    EVAL_TOKEN_SWAPS,
     FIELD_ORDER,
     STAGE3_VERSION,
 )
 from src.core.logger import get_logger
+from src.stage3.embedding import build_stopwords
 
 LOGGER = get_logger(__name__)
 
@@ -65,6 +83,10 @@ class DuplicateTruth:
     source_rows: Tuple[int, ...]
     n_pairs: int
     max_day_gap: int = EVAL_DUPLICATE_MAX_DAY_GAP
+    #: Perturbation applied to each pair, aligned to ``source_rows``.
+    #: Recorded so recall can be broken down by difficulty rather than
+    #: reported as a single number that explains nothing.
+    perturbations: Tuple[str, ...] = ()
 
     @property
     def true_pairs(self) -> Set[frozenset]:
@@ -85,7 +107,126 @@ class DuplicateTruth:
             "n_labelled_rows": len(self.duplicate_id),
             "n_true_pairs": len(self.true_pairs),
             "max_day_gap": self.max_day_gap,
+            "perturbation_counts": {
+                kind: int(self.perturbations.count(kind))
+                for kind in sorted(set(self.perturbations))
+            },
         }
+
+
+
+def _content_tokens(name: str, stopwords: frozenset) -> List[Tuple[int, str]]:
+    """Positions and values of tokens that survive preprocessing.
+
+    A perturbation is only real if it lands on a token the detector can still
+    see. Stopwords, digits and short fragments are excluded: changing a
+    stopword is invisible, and changing the ward number would make the record a
+    different work rather than a duplicate of the same one.
+
+    Args:
+        name: The raw work name.
+        stopwords: The stopword set the detector applies.
+
+    Returns:
+        ``(index, token)`` pairs into ``name.split()``.
+    """
+    tokens = name.split()
+    return [
+        (position, token)
+        for position, token in enumerate(tokens)
+        if token.isalpha() and len(token) >= 4 and token.lower() not in stopwords
+    ]
+
+
+def perturb_work_name(
+    name: str, kind: str, stopwords: frozenset, position_seed: int
+) -> str:
+    """Apply one preprocessing-surviving perturbation to a work name.
+
+    Args:
+        name: The source work name.
+        kind: ``"typo"``, ``"swap"`` or ``"truncate"``.
+        stopwords: The stopword set the detector applies.
+        position_seed: Deterministically selects which content token is hit.
+
+    Returns:
+        The perturbed name, or the original when no content token exists to
+        perturb - in which case the pair is dropped rather than counted as a
+        detected duplicate it never was.
+    """
+    tokens = name.split()
+    candidates = _content_tokens(name, stopwords)
+    if not candidates:
+        return name
+
+    index, token = candidates[position_seed % len(candidates)]
+
+    if kind == "swap":
+        lowered = token.lower()
+        for left, right in EVAL_TOKEN_SWAPS:
+            if lowered == left:
+                tokens[index] = right
+                return " ".join(tokens)
+            if lowered == right:
+                tokens[index] = left
+                return " ".join(tokens)
+        kind = "typo"  # no synonym for this token; fall through
+
+    if kind == "truncate":
+        # Drop the token entirely - a shortened description of the same work.
+        del tokens[index]
+        return " ".join(tokens)
+
+    # "typo": transpose two interior characters. Survives preprocessing because
+    # the result is still an alphabetic non-stopword, and it is exactly the
+    # data-entry error a real register carries.
+    middle = max(1, len(token) // 2)
+    if middle + 1 >= len(token):
+        return " ".join(tokens)
+    mangled = (
+        token[:middle] + token[middle + 1] + token[middle] + token[middle + 2 :]
+    )
+    tokens[index] = mangled
+    return " ".join(tokens)
+
+
+def assert_perturbations_are_real(
+    frame: pd.DataFrame,
+    truth: "DuplicateTruth",
+    stopwords: frozenset,
+) -> Dict[str, Any]:
+    """Verify each injected pair actually differs after preprocessing.
+
+    The failure this guards against is the one that invalidated the first
+    harness: a perturbation the detector cannot see makes the evaluation a test
+    of exact matching wearing a near-duplicate label.
+
+    Args:
+        frame: The augmented frame.
+        truth: The injected ground truth.
+        stopwords: The stopword set the detector applies.
+
+    Returns:
+        Counts of identical and differing pairs, post-preprocessing.
+    """
+    from src.stage3.embedding import normalize_work_text
+
+    view = normalize_work_text(
+        frame["work_name"],
+        stopwords,
+        truncate_at_locality_clause=False,
+        keep_digits=True,
+    )
+    identical = 0
+    for source, injected in zip(truth.source_rows, truth.injected_rows):
+        if view.iloc[source] == view.iloc[injected]:
+            identical += 1
+    return {
+        "pairs": len(truth.source_rows),
+        "identical_after_preprocessing": identical,
+        "distinct_after_preprocessing": len(truth.source_rows) - identical,
+        "trivial": identical > 0,
+    }
 
 
 def inject_duplicate_pairs(
@@ -129,6 +270,7 @@ def inject_duplicate_pairs(
         return working, DuplicateTruth({}, (), (), 0, max_day_gap)
 
     rng = np.random.default_rng(seed)
+    stopwords = build_stopwords(working)
 
     # Only rows with a usable name, district and date can seed a valid pair:
     # the detector requires all three, so a source lacking any of them would
@@ -152,9 +294,14 @@ def inject_duplicate_pairs(
     sources = np.sort(rng.choice(usable, size=take, replace=False))
     shifts = rng.integers(1, max_day_gap + 1, size=take)
     action_choice = rng.integers(0, len(actions), size=take)
+    kind_choice = rng.integers(0, len(EVAL_PERTURBATIONS), size=take)
+    token_choice = rng.integers(0, 997, size=take)
+    jitter = rng.uniform(EVAL_AMOUNT_JITTER[0], EVAL_AMOUNT_JITTER[1], size=take)
+    jitter_sign = rng.choice(np.asarray([-1.0, 1.0]), size=take)
 
     duplicate_id: Dict[int, int] = {}
     injected_rows: List[int] = []
+    used_kinds: List[str] = []
     # Tracked alongside the rows actually created. Slicing the source array
     # afterwards would misalign the two lists the moment one source is
     # skipped, silently pairing each duplicate with the wrong original.
@@ -164,9 +311,25 @@ def inject_duplicate_pairs(
     for position, source in enumerate(sources):
         original = working.loc[source]
         name = str(original["work_name"])
-        # Swap the leading action verb: everything up to " of " is the action.
+
+        # 1. Swap the leading action verb. Realistic, but INVISIBLE to the
+        #    detector because action verbs are stopwords - which is precisely
+        #    what invalidated the first harness. Kept for realism only; it is
+        #    never relied on to make the pair a near match.
         tail = name.split(" of ", 1)[1] if " of " in name else name
         new_name = f"{actions[int(action_choice[position])]} {tail}"
+
+        # 2. Perturb a token that SURVIVES preprocessing. This is the change
+        #    that makes the evaluation non-trivial.
+        kind = EVAL_PERTURBATIONS[int(kind_choice[position])]
+        perturbed = perturb_work_name(
+            new_name, kind, stopwords, int(token_choice[position])
+        )
+        if perturbed == new_name:
+            # No surviving token to perturb, so this pair would be an exact
+            # match and would inflate the score. Drop it rather than count it.
+            continue
+        new_name = perturbed
 
         base_date = parsed_dates.loc[source]
         if pd.isna(base_date):
@@ -179,11 +342,28 @@ def inject_duplicate_pairs(
         row["date_proposal"] = new_date.date().isoformat()
         row["date_approval"] = None
         row["date_completion"] = None
+
+        # 3. Amount jitter: a re-estimate of the same work, not a copy of the
+        #    figure. Does not affect detection (which is text + district + time)
+        #    but keeps the injected record realistic for anything downstream.
+        for money_field in ("sanction_amount", "amount_spent"):
+            value = original.get(money_field)
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(numeric):
+                row[money_field] = round(
+                    numeric
+                    * (1.0 + float(jitter_sign[position]) * float(jitter[position])),
+                    2,
+                )
         new_rows.append(row)
 
         new_position = n_source + len(new_rows) - 1
         injected_rows.append(new_position)
         used_sources.append(int(source))
+        used_kinds.append(kind)
         duplicate_id[int(source)] = position
         duplicate_id[int(new_position)] = position
 
@@ -199,8 +379,8 @@ def inject_duplicate_pairs(
     )
 
     LOGGER.info(
-        "Injected %d labelled duplicate pair(s): same district, name perturbed, "
-        "date shifted by 1-%d days.",
+        "Injected %d labelled duplicate pair(s): same district, a "
+        "preprocessing-surviving token perturbation, date shifted by 1-%d days.",
         len(new_rows),
         max_day_gap,
     )
@@ -208,6 +388,7 @@ def inject_duplicate_pairs(
         duplicate_id=duplicate_id,
         injected_rows=tuple(injected_rows),
         source_rows=tuple(used_sources),
+        perturbations=tuple(used_kinds),
         n_pairs=len(new_rows),
         max_day_gap=max_day_gap,
     )
@@ -236,6 +417,8 @@ def evaluate_duplicates(
     duplicate_group_id: pd.Series,
     truth: DuplicateTruth,
     duplicate_score: Optional[pd.Series] = None,
+    pair_similarity: Optional[Sequence[float]] = None,
+    threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Score the detector against injected ground truth, pairwise.
 
@@ -248,6 +431,11 @@ def evaluate_duplicates(
         duplicate_group_id: Stage 3's per-record group assignment.
         truth: Injected ground truth.
         duplicate_score: Optional per-record score, summarised for context.
+        pair_similarity: Optional cosine per injected pair, aligned to
+            ``truth.source_rows``. Supplying it turns a bare recall number
+            into a diagnosis: whether the detector missed pairs it could
+            see, or was never shown a pair above its threshold.
+        threshold: The detector's similarity threshold, for that diagnosis.
 
     Returns:
         A JSON-serialisable report with precision, recall and F1.
@@ -271,10 +459,17 @@ def evaluate_duplicates(
         "stage3_version": STAGE3_VERSION,
         "_note": (
             "Measured against duplicates injected by "
-            "src.stage3.evaluation.inject_duplicate_pairs, which satisfy "
-            "Stage3.md sec.9.1's definition: same district, near-identical "
-            "text, within a few days. Stage 1's own duplicate channel clones "
-            "names across districts and CANNOT validate this detector."
+            "src.stage3.evaluation.inject_duplicate_pairs: same district, "
+            "within a few days, and perturbed on a token that SURVIVES "
+            "preprocessing. Stage 1's own duplicate channel clones names "
+            "across districts and cannot validate this detector."
+        ),
+        "_withdrawn": (
+            "A previously reported F1 of 0.929 is WITHDRAWN. That harness "
+            "perturbed only the action verb, which is a stopword, so 60/60 "
+            "injected pairs were byte-identical in the detector's own text "
+            "view. It measured exact-match retrieval, not near-duplicate "
+            "detection."
         ),
         "ground_truth": truth.to_dict(),
         "pairs": {
@@ -288,6 +483,57 @@ def evaluate_duplicates(
         "recall": round(recall, 6),
         "f1": round(f1, 6),
     }
+
+    # Per-perturbation recall. A single recall number cannot distinguish a
+    # detector that is broken from one that is being handed pairs outside
+    # its operating range; this can.
+    if truth.perturbations:
+        by_kind: Dict[str, Dict[str, Any]] = {}
+        for kind in sorted(set(truth.perturbations)):
+            rows = [
+                index
+                for index, value in enumerate(truth.perturbations)
+                if value == kind
+            ]
+            pairs_of_kind = {
+                frozenset((truth.source_rows[i], truth.injected_rows[i]))
+                for i in rows
+            }
+            found = len(pairs_of_kind & predicted)
+            by_kind[kind] = {
+                "pairs": len(pairs_of_kind),
+                "found": found,
+                "recall": round(found / len(pairs_of_kind), 6)
+                if pairs_of_kind
+                else 0.0,
+            }
+        report["recall_by_perturbation"] = by_kind
+
+    # Cosine diagnosis: how many injected pairs the detector could even
+    # have found, given its threshold.
+    if pair_similarity is not None and len(pair_similarity):
+        similarity = np.asarray(list(pair_similarity), dtype="float64")
+        entry: Dict[str, Any] = {
+            "min": round(float(similarity.min()), 6),
+            "median": round(float(np.median(similarity)), 6),
+            "max": round(float(similarity.max()), 6),
+            "n_exactly_one": int((similarity >= 1.0 - 1e-9).sum()),
+        }
+        if threshold is not None:
+            reachable = int((similarity >= threshold).sum())
+            entry["threshold"] = float(threshold)
+            entry["pairs_at_or_above_threshold"] = reachable
+            entry["pct_reachable"] = round(
+                100.0 * reachable / similarity.size, 4
+            )
+            entry["_reading"] = (
+                "Pairs below the threshold are unreachable BEFORE the "
+                "temporal decay is applied, so they bound recall from above. "
+                "Low recall against a low reachable share is a "
+                "representation limit, not a defect in the grouping logic."
+            )
+        report["pair_similarity"] = entry
+    return report
 
     if duplicate_score is not None and len(duplicate_score):
         labelled = sorted(truth.duplicate_id)
@@ -310,4 +556,3 @@ def evaluate_duplicates(
         f1,
         len(actual),
     )
-    return report

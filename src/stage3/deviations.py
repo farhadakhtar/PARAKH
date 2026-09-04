@@ -40,6 +40,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from src.core.constants import (
+    DEVIATION_BUCKETS,
+    DEVIATION_REASON_CLUSTER_NOISE,
+    NOISE_CLUSTER_ID,
+    Z_EXTREME_THRESHOLD,
+    Z_HIGH_THRESHOLD,
+)
 from src.core.logger import get_logger
 from src.stage3.peer_cells import PeerStatistics
 
@@ -54,10 +61,13 @@ DEVIATION_SPECS: Tuple[Tuple[str, str, str], ...] = (
     ("deviation_duration", "duration_days", "cell"),
 )
 
-#: Why a deviation could not be computed. Ordered by precedence.
+#: Why a deviation could not be computed. Ordered by precedence: the cause
+#: listed first wins, so an explanation names the first thing that would have
+#: to be fixed.
 UNDEFINED_REASONS: Tuple[str, ...] = (
     "defined",
     "feature_missing",
+    DEVIATION_REASON_CLUSTER_NOISE,
     "cell_unstable",
     "no_peer_norm",
     "zero_dispersion",
@@ -97,8 +107,47 @@ class DeviationResult:
                 if defined.any()
                 else None,
                 "reasons": self.frame[f"{name}_reason"].value_counts().to_dict(),
+                "buckets": self.frame[f"{name}_bucket"].value_counts().to_dict(),
+                "n_extreme": int(
+                    (self.frame[f"{name}_bucket"] == "extreme").sum()
+                ),
             }
         return {"deviations": summary, **self.diagnostics}
+
+
+
+def magnitude_bucket(
+    values: np.ndarray,
+    high: float = Z_HIGH_THRESHOLD,
+    extreme: float = Z_EXTREME_THRESHOLD,
+) -> np.ndarray:
+    """Band each deviation by magnitude, without altering it.
+
+    AUDIT M4. Deviations are deliberately **not clipped**: a 1e300 sanction
+    genuinely does sit thousands of MADs from its peers, and truncating that
+    would be exactly the silent corruption Stage 1 exists to prevent. But the
+    raw distribution has a maximum 255x its own p99, so a magnitude-weighted
+    aggregation in Stage 4 would be decided by a couple of dozen records.
+
+    The bucket lets Stage 4 see the tail coming while the raw value survives
+    untouched. ``undefined`` is a band of its own rather than a gap, so the
+    NaN-carries-a-reason discipline holds here too.
+
+    Args:
+        values: Signed deviations; NaN where undefined.
+        high: |z| above which a deviation is "high".
+        extreme: |z| above which it is "extreme".
+
+    Returns:
+        Object array of bucket labels, aligned to ``values``.
+    """
+    magnitude = np.abs(values)
+    buckets = np.full(values.shape, "undefined", dtype=object)
+    defined = np.isfinite(values)
+    buckets[defined] = "normal"
+    buckets[defined & (magnitude >= high)] = "high"
+    buckets[defined & (magnitude >= extreme)] = "extreme"
+    return buckets
 
 
 def _lookup(stats: pd.DataFrame, keys: pd.Series, column: str) -> np.ndarray:
@@ -115,6 +164,8 @@ def compute_deviations(
     cluster_id: pd.Series,
     peer_cell_stable: pd.Series,
     specs: Sequence[Tuple[str, str, str]] = DEVIATION_SPECS,
+    high_threshold: float = Z_HIGH_THRESHOLD,
+    extreme_threshold: float = Z_EXTREME_THRESHOLD,
 ) -> DeviationResult:
     """Compute robust deviations from peer norms.
 
@@ -125,6 +176,8 @@ def compute_deviations(
         cluster_id: Cluster per record.
         peer_cell_stable: Whether each record's cell may be trusted.
         specs: ``(output, feature, level)`` triples to compute.
+        high_threshold: |z| above which a deviation is bucketed "high".
+        extreme_threshold: |z| above which it is bucketed "extreme".
 
     Returns:
         A :class:`DeviationResult` whose frame carries one float column and one
@@ -135,6 +188,11 @@ def compute_deviations(
     output = pd.DataFrame(index=index)
 
     stable = peer_cell_stable.to_numpy(dtype=bool)
+    # AUDIT M1. The noise cluster no longer emits a norm, so a noise record
+    # would otherwise fall out as the generic "no_peer_norm". It gets its own
+    # reason because the cause is different and so is the remedy: the norm is
+    # not thin, the record simply could not be classified.
+    is_noise = (cluster_id == NOISE_CLUSTER_ID).to_numpy(dtype=bool)
 
     for name, feature, level in specs:
         reason = np.full(n_records, "defined", dtype=object)
@@ -144,6 +202,9 @@ def compute_deviations(
             output[name] = values
             output[f"{name}_reason"] = pd.Series(
                 np.full(n_records, "feature_missing", dtype=object), index=index
+            )
+            output[f"{name}_bucket"] = pd.Series(
+                np.full(n_records, "undefined", dtype=object), index=index
             )
             continue
 
@@ -164,7 +225,9 @@ def compute_deviations(
         no_norm = ~np.isfinite(median)
         zero_scale = np.isfinite(median) & ~np.isfinite(mad)
 
-        computable = ~feature_missing & ~unstable & ~no_norm & ~zero_scale
+        computable = (
+            ~feature_missing & ~unstable & ~no_norm & ~zero_scale & ~is_noise
+        )
         if computable.any():
             values.loc[computable] = (raw[computable] - median[computable]) / mad[
                 computable
@@ -175,11 +238,23 @@ def compute_deviations(
         reason[zero_scale] = "zero_dispersion"
         reason[no_norm] = "no_peer_norm"
         reason[unstable] = "cell_unstable"
+        reason[is_noise] = DEVIATION_REASON_CLUSTER_NOISE
         reason[feature_missing] = "feature_missing"
         reason[computable] = "defined"
 
         output[name] = values.astype("float64")
         output[f"{name}_reason"] = pd.Series(reason, index=index, dtype="object")
+        # Raw value preserved; the bucket is metadata beside it, never a
+        # replacement for it.
+        output[f"{name}_bucket"] = pd.Series(
+            magnitude_bucket(
+                output[name].to_numpy(dtype="float64"),
+                high=high_threshold,
+                extreme=extreme_threshold,
+            ),
+            index=index,
+            dtype="object",
+        )
 
     for name, _, _ in specs:
         finite = np.isfinite(output[name].to_numpy(dtype="float64"))

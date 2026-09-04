@@ -45,6 +45,12 @@ from src.stage2.confidence import (
     confidence_summary_frame,
 )
 from src.stage3.pipeline import STAGE3_COLUMNS, SemanticLayer, attach_structure
+from src.stage4.pipeline import (
+    STAGE4_COLUMNS,
+    AnomalyConfig,
+    AnomalyLayer,
+    attach_anomalies,
+)
 from src.utils.helpers import ensure_dir
 
 LOGGER = get_logger(__name__)
@@ -106,6 +112,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stop after Stage 2; skip peer structure.",
     )
+    parser.add_argument(
+        "--stage3-only",
+        action="store_true",
+        help="Stop after Stage 3; skip anomaly interpretation.",
+    )
+    parser.add_argument(
+        "--duplicate-diagnostics",
+        action="store_true",
+        help=(
+            "Also measure what the duplicate detector can see. Descriptive "
+            "only; changes no flag and no decision."
+        ),
+    )
     return parser
 
 
@@ -139,6 +158,8 @@ def run(
     save: bool = True,
     run_stage2: bool = True,
     run_stage3: bool = True,
+    run_stage4: bool = True,
+    duplicate_diagnostics: bool = False,
 ) -> Corpus:
     """Execute the Stage 1 pipeline and print its reports.
 
@@ -152,6 +173,8 @@ def run(
         save: When False, nothing is written to disk.
         run_stage2: Also score evidentiary confidence.
         run_stage3: Also build peer structure.
+        run_stage4: Also interpret deviations into anomalies and decisions.
+        duplicate_diagnostics: Also measure duplicate observability.
 
     Returns:
         The constructed corpus.
@@ -265,8 +288,151 @@ def run(
             _run_stage3(
                 corpus, output_dir=output_dir, head_rows=head_rows, save=save
             )
+            if run_stage4:
+                _run_stage4(
+                    corpus,
+                    output_dir=output_dir,
+                    head_rows=head_rows,
+                    save=save,
+                    duplicate_diagnostics=duplicate_diagnostics,
+                )
 
     return corpus
+
+
+def _run_stage4(
+    corpus: Corpus,
+    output_dir: Path,
+    head_rows: int,
+    save: bool,
+    duplicate_diagnostics: bool = False,
+) -> None:
+    """Interpret the Stage 3 deviations and print the Stage 4 reports.
+
+    Args:
+        corpus: A corpus already carrying Stage 2 and Stage 3 outputs.
+        output_dir: Where the Stage 4 report is written.
+        head_rows: How many records to preview.
+        save: When False, nothing is written to disk.
+        duplicate_diagnostics: Also measure duplicate observability.
+    """
+    _banner("STAGE 4  CONTEXTUAL ANOMALY INTERPRETATION")
+    result = attach_anomalies(
+        corpus,
+        config=AnomalyConfig(
+            compute_calibration=True,
+            compute_duplicate_diagnostics=duplicate_diagnostics,
+        ),
+    )
+    report = result.report()
+    records = corpus.records
+
+    print(
+        f"Interpreted {len(result):,} records in {result.elapsed_seconds:.2f}s; "
+        f"{len(STAGE4_COLUMNS)} contract columns. Nothing was recomputed."
+    )
+    print("  Provisional triage only: severity_score is not Stage 5's R(r),")
+    print("  and decision_class is superseded by Stage 6's routing.")
+
+    print("\n--- anomaly types (a record may carry several) ---")
+    for name, count in report["anomaly_types"].items():
+        pct = 100.0 * count / max(len(result), 1)
+        print(f"  {name:<22} {count:>7,}  ({pct:5.2f}%)")
+
+    print("\n--- signal availability: what could actually be measured ---")
+    counts = report["signals"]["validation"]["valid_signal_count"]
+    for available in sorted(counts):
+        print(f"  {available} usable signal(s)   {counts[available]:>7,}")
+    print(f"  cost comparison scope : {report['signals']['cost_scope']}")
+
+    print("\n--- severity, over measurable records only ---")
+    severity = report["severity"]
+    print(
+        f"  defined for {severity['defined_pct']}% of records;"
+        f" median {severity['median']}, p95 {severity['p95']},"
+        f" max {severity['max']}"
+    )
+    print(
+        f"  {severity['n_undefined']:,} record(s) have NO severity - undefined,"
+        " not zero: nothing about them could be measured."
+    )
+
+    print("\n--- why a severity is undefined, stated rather than implied ---")
+    definedness = report["severity"]["definedness"]
+    for name, count in sorted(definedness["by_reason"].items()):
+        print(f"  {name:<24} {count:>7,}")
+    if definedness["rule_divergence"]:
+        print(
+            f"  WARNING: {definedness['rule_divergence']} record(s) diverge from"
+            " the stated definedness rule; severity left as computed."
+        )
+
+    print("\n--- provisional triage ---")
+    for name, count in report["decision"]["decision_class"].items():
+        pct = 100.0 * count / max(len(result), 1)
+        print(f"  {name:<22} {count:>7,}  ({pct:5.2f}%)")
+    print("  rule that fired:")
+    for name, count in report["decision"]["decision_reason"].items():
+        print(f"    {name:<52} {count:>7,}")
+    print(
+        f"\n  Confidence gate held:"
+        f" {report['decision']['n_escalated']:,} escalation(s),"
+        " none of them on low-confidence evidence."
+    )
+
+    if result.duplicates is not None:
+        print("\n--- duplicate observability (diagnostic; detector unchanged) ---")
+        diagnostics = result.duplicates.to_dict()
+        print(
+            f"  {diagnostics['n_candidate_pairs']:,} candidate pair(s) over"
+            f" {diagnostics['n_blocks']:,} block(s)"
+        )
+        print("  pairs at or above each cosine cut:")
+        for cut, count in diagnostics["pairs_at_or_above"].items():
+            print(f"    >= {cut}   {count:>8,}")
+        seen = diagnostics["records"]
+        print(
+            f"  {seen['reachable']['count']:,} record(s) have a near-identical"
+            f" partner by text; {seen['flagged']['count']:,} are flagged"
+        )
+        decay = diagnostics["decay_attenuation"]
+        print(
+            f"  {decay['pairs_lost_to_decay']:,} of"
+            f" {decay['pairs_above_cosine_threshold']:,} text-passing pair(s)"
+            f" are lost to temporal decay ({decay['pct_lost_to_decay']}%)"
+        )
+
+    print("\n--- worked examples, one per decision class ---")
+    for decision_class in ("INVESTIGATE", "REMEDIATE", "INSUFFICIENT_CONTEXT"):
+        queue = result.queue(decision_class)
+        if not len(queue):
+            continue
+        row = queue.index[0]
+        print(f"\n  [{decision_class}] record {row}")
+        print(f"    types    : {records.loc[row, 'anomaly_types']}")
+        print(f"    severity : {records.loc[row, 'severity_score']}")
+        print(f"    {records.loc[row, 'explanation_text']}")
+
+    print("\n--- enriched records ---")
+    preview = [
+        "severity_score",
+        "decision_class",
+        "z_cost",
+        "cost_scope",
+        "z_spend",
+        "z_duration",
+        "valid_signal_count",
+        "confidence_flag",
+    ]
+    with pd.option_context("display.max_columns", None, "display.width", 200):
+        print(records[preview].head(head_rows).to_string())
+
+    if save:
+        ensure_dir(output_dir)
+        for name, path in result.save_reports(output_dir).items():
+            print(f"\n  {name:<20} -> {path}")
+    else:
+        print("\n  --no-save: nothing written.")
 
 
 def _run_stage3(
@@ -469,6 +635,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             save=not args.no_save,
             run_stage2=not args.stage1_only,
             run_stage3=not (args.stage1_only or args.stage2_only),
+            run_stage4=not (
+                args.stage1_only or args.stage2_only or args.stage3_only
+            ),
+            duplicate_diagnostics=args.duplicate_diagnostics,
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         LOGGER.exception("Stage 1 failed: %s", exc)

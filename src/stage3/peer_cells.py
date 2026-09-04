@@ -108,6 +108,20 @@ class PeerStatistics:
     reference_mask: pd.Series
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
+    def cluster_has_norm(self, cluster_id: int) -> bool:
+        """Whether a cluster carries a usable norm.
+
+        False for the noise cluster by construction (AUDIT M1) and for any
+        cluster with too few effective reference values.
+        """
+        if int(cluster_id) == NOISE_CLUSTER_ID:
+            return False
+        if int(cluster_id) not in self.cluster_stats.index:
+            return False
+        row = self.cluster_stats.loc[int(cluster_id)]
+        medians = [c for c in self.cluster_stats.columns if c.endswith("_median")]
+        return bool(any(pd.notna(row[column]) for column in medians))
+
     def to_dict(self) -> Dict[str, Any]:
         """JSON-serialisable summary."""
         return {
@@ -305,11 +319,31 @@ def compute_peer_statistics(
         Cluster-level norms use ``reference_mask`` alone, without
         ``stable_mask``: a cluster is a valid comparison group even when one of
         its strata is too thin to be one.
+
+    Note:
+        **The noise cluster never defines a norm** (AUDIT M1). No row is
+        emitted for ``cluster_id == -1`` at all, so downstream code that
+        looks one up gets a miss rather than a plausible-looking statistic.
+
+    Note:
+        **Gating uses the effective sample size** (AUDIT M3): the count of
+        finite values of the field being summarised, not the count of group
+        members. Both are reported - ``n_reference`` and
+        ``<field>_n_effective`` - and they may legitimately differ.
     """
     available = [name for name in fields if name in frame.columns]
     missing = [name for name in fields if name not in frame.columns]
     if missing:
         LOGGER.warning("Statistic field(s) absent from the frame, skipped: %s", missing)
+
+    def _empty_stats(label: str) -> pd.DataFrame:
+        """An empty, correctly-shaped statistics frame."""
+        columns = [label, "n_reference"] + [
+            f"{name}_{suffix}"
+            for name in available
+            for suffix in ("median", "mad", "n_effective")
+        ]
+        return pd.DataFrame(columns=columns).set_index(label)
 
     def _group_stats(
         keys: pd.Series, basis: pd.Series, label: str
@@ -319,37 +353,61 @@ def compute_peer_statistics(
             columns = [label, "n_reference"] + [
                 f"{name}_{suffix}"
                 for name in available
-                for suffix in ("median", "mad", "n")
+                for suffix in ("median", "mad", "n_effective")
             ]
             return pd.DataFrame(columns=columns).set_index(label)
 
         basis_array = basis.to_numpy(dtype=bool)
         key_array = keys.to_numpy()
         for key in np.unique(key_array):
+            # AUDIT M1: the noise cluster is not a comparison group. Its members
+            # are precisely the records the clusterer judged similar to nothing,
+            # so pooling them yields a norm that describes no population. It is
+            # skipped outright rather than gated, so no row exists to be misread
+            # as "a norm that happened to come out empty".
+            if label == "cluster_id" and int(key) == NOISE_CLUSTER_ID:
+                continue
+
             member = (key_array == key) & basis_array
             n_reference = int(member.sum())
             row: Dict[str, Any] = {label: int(key), "n_reference": n_reference}
-            usable = n_reference >= int(min_reference)
+
             for name in available:
-                if usable:
-                    median, mad, count = _robust_stats(
-                        frame.loc[member, name].to_numpy(dtype="float64", na_value=np.nan)
-                    )
+                # AUDIT M3: the guard and the estimator must count the same
+                # thing. n_reference counts group membership; _robust_stats then
+                # independently drops non-finite values, so a group of 15 could
+                # emit a median from 2 points while reporting n_reference = 15.
+                # Gate on the EFFECTIVE count instead - the values actually used.
+                values = frame.loc[member, name].to_numpy(
+                    dtype="float64", na_value=np.nan
+                )
+                n_effective = int(np.isfinite(values).sum())
+                if n_effective >= int(min_reference):
+                    median, mad, _ = _robust_stats(values)
                 else:
-                    median, mad, count = float("nan"), float("nan"), 0
+                    median, mad = float("nan"), float("nan")
                 row[f"{name}_median"] = median
                 row[f"{name}_mad"] = mad
-                row[f"{name}_n"] = count
+                # Always the true finite count, even when the norm was withheld,
+                # so "withheld" and "zero values" stay distinguishable.
+                row[f"{name}_n_effective"] = n_effective
             rows.append(row)
+        # Every key may have been skipped - a corpus that is entirely noise
+        # yields no cluster rows at all. Return the empty shape rather than
+        # letting set_index fail on a frame with no columns.
+        if not rows:
+            return _empty_stats(label)
         return pd.DataFrame(rows).set_index(label)
 
     cell_basis = reference_mask & stable_mask
     cell_stats = _group_stats(peer_cell_id, cell_basis, "peer_cell_id")
     cluster_stats = _group_stats(cluster_id, reference_mask, "cluster_id")
 
+    # Counted on the emitted median, not on n_reference, now that the two
+    # can legitimately disagree (AUDIT M3).
     usable_cells = (
-        int((cell_stats["n_reference"] >= min_reference).sum())
-        if len(cell_stats)
+        int(cell_stats[f"{available[0]}_median"].notna().sum())
+        if len(cell_stats) and available
         else 0
     )
     LOGGER.info(
@@ -357,8 +415,8 @@ def compute_peer_statistics(
         "high-confidence members (min %d).",
         usable_cells,
         len(cell_stats),
-        int((cluster_stats["n_reference"] >= min_reference).sum())
-        if len(cluster_stats)
+        int(cluster_stats[f"{available[0]}_median"].notna().sum())
+        if len(cluster_stats) and available
         else 0,
         len(cluster_stats),
         min_reference,
@@ -372,8 +430,23 @@ def compute_peer_statistics(
             "fields": list(available),
             "min_reference": int(min_reference),
             "usable_cells": usable_cells,
+            "noise_cluster_excluded": True,
+            "clusters_with_norm": [int(k) for k in cluster_stats.index],
+            "withheld_for_small_effective_n": {
+                name: int(
+                    (cell_stats[f"{name}_n_effective"] < min_reference).sum()
+                )
+                if len(cell_stats)
+                else 0
+                for name in available
+            },
             "zero_mad_cells": {
-                name: int(cell_stats[f"{name}_mad"].isna().sum())
+                name: int(
+                    (
+                        cell_stats[f"{name}_median"].notna()
+                        & cell_stats[f"{name}_mad"].isna()
+                    ).sum()
+                )
                 if len(cell_stats)
                 else 0
                 for name in available

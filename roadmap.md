@@ -1104,7 +1104,411 @@ all defaulting to previous behaviour), `README.md`, `roadmap.md`,
 
 ---
 
-## Stages 4–7
+## Stage 3 Audit Remediation — M1–M4
+
+**Status: COMPLETE** · **Tests: 614 total, 0 failing** (was 581; +33)
+**Contract: 22 → 27 columns.** No formula, clustering decision or threshold changed.
+
+### M1 — The noise cluster no longer defines a norm
+
+`form_peer_cells` forced noise *cells* unstable, but `compute_peer_statistics`
+had no equivalent guard at cluster level, so `cluster_id = -1` was emitting a
+median and MAD pooled from records HDBSCAN judged similar to nothing.
+
+| | before | after |
+|---|---|---|
+| `-1` row in `cluster_stats` | present, `n_reference` 1,331 | **absent** |
+| records measured against the noise pool | 1,309 (7.6% of defined cluster deviations) | **0** |
+| noise-pool MAD vs typical cluster | 0.803 vs 0.499 (**61% wider** → systematic under-flagging) | n/a |
+
+Noise records keep `cluster_id = -1`, keep their peer-cell assignment, and now
+report reason **`cluster_noise`** rather than the generic `no_peer_norm` — the
+cause differs and so does the remedy. New column **`cluster_has_norm`** (False
+for exactly the 1,524 noise records).
+
+### M2 — The duplicate evaluation was invalid; it is withdrawn
+
+> **The previously reported F1 of 0.929 is WITHDRAWN.** The harness perturbed
+> only the *action verb*, which is a stopword in `normalize_work_text`, so the
+> perturbation was erased before the detector saw it. Verified: **60 of 60**
+> injected pairs were byte-identical in the detector's own text view. It
+> measured exact-match retrieval, not near-duplicate detection.
+
+Perturbations now act on tokens that **survive** preprocessing — a typo inside a
+content word, a synonym swap, a dropped token — plus ±5–20% amount jitter and a
+time shift. `assert_perturbations_are_real` checks the property directly.
+
+| | before | after |
+|---|---|---|
+| identical after preprocessing | 60/60 | **0/282** |
+| cosine(original, duplicate) | 1.000 for all | median **0.389**, max **0.897** |
+| **F1** | 0.929 (invalid) | **0.020** |
+| precision / recall | 0.939 / 0.920 | 0.143 / 0.011 |
+
+**The detector is not broken — this is a representation limit, and the report
+now says which.** Only **11.3%** of injected pairs reach the 0.85 cosine
+threshold at all, so recall is bounded above by that before temporal decay even
+applies. Work names normalise to ~3 content tokens, so a single-token change
+costs most of the cosine. Recall by perturbation: truncate 0.034, typo 0.000,
+swap 0.000. A control test confirms a genuine same-district, same-week, same-text
+pair is still grouped correctly.
+
+The detector itself was **not modified**, per the brief.
+
+### M3 — Statistics gate on effective sample size
+
+`n_reference` counted group membership; `_robust_stats` then independently
+dropped non-finite values. A cell of 15 could emit a median from 2 points while
+reporting `n_reference = 15`. Largest observed gap: **276**.
+
+The guard now uses the **effective** count — finite values of the field actually
+being summarised. Both are stored: `n_reference` and `<field>_n_effective`
+(renamed from the ambiguous `<field>_n`, which was zeroed on withholding and so
+conflated "not computed" with "no values"). 37 cells per field are now correctly
+withheld.
+
+### M4 — Extreme deviations flagged, never clipped
+
+Raw values are **preserved**: a 1e300 sanction genuinely is thousands of MADs
+from its peers, and truncating that would be the silent corruption Stage 1
+exists to prevent. Metadata added beside it:
+
+`<deviation>_bucket` ∈ `undefined` / `normal` (<5) / `high` (5–20) / `extreme` (≥20)
+
+On the 20k corpus: 15,327 normal · 340 high · **43 extreme** · 4,290 undefined.
+Max |z| = **3049.7, unchanged**. `undefined` is a bucket rather than a gap, so
+the NaN-carries-a-reason rule holds here too.
+
+### One bug introduced and caught
+
+Skipping the noise key left `rows` empty on an **all-noise corpus**, and
+`pd.DataFrame([]).set_index("cluster_id")` raised `KeyError`. Five edge-case
+tests caught it; an `_empty_stats` guard returns the correctly-shaped empty
+frame.
+
+### Invariant check
+
+- ✅ **No noise contributes to norms** — `-1` absent from `cluster_stats`; all its deviations NaN
+- ✅ **Duplicate evaluation is non-trivial** — 0/282 identical post-preprocessing, max cosine 0.897 < 1.0
+- ✅ **All statistics use effective sample size** — every emitted norm has `n_effective ≥ 8`
+- ✅ No feature leakage into clustering (0 district/state/vendor tokens in vocabulary)
+- ✅ No anomaly scoring introduced
+- ✅ Stage 2's 17 columns byte-identical
+- ✅ Determinism preserved; deviation formula recomputed by hand on 40 records
+- ✅ Clusters 17, noise 7.62%, stable coverage 78.55% — **unchanged**
+
+### Known limitations after remediation
+
+1. **Duplicate detection has ~1% recall on realistic near-duplicates.** The
+   honest number. Fixing it means changing the detector (out of scope here):
+   character n-grams, a lower threshold, or blocking on locality.
+2. **The perturbation may be harsher than reality** — a single-token change on a
+   3-token name is a large relative edit. Real double-claims often repeat more
+   text. The 11.3% reachable figure bounds the task, not the detector.
+3. **`Z_EXTREME_THRESHOLD = 20` and `Z_HIGH_THRESHOLD = 5` are judgements**, not
+   estimates, like every other Stage 3 parameter.
+4. Audit findings **N1–N4 remain open**: 42 records where locality truncation
+   fails, 26 junk vocabulary fragments polluting 2 of 17 cluster labels, the
+   roadmap's earlier "six of ten defaults" miscount (actual: **3 of 11**), and
+   steep small-corpus degradation.
+
+---
+
+## Stage 4 — Contextual Anomaly Interpretation
+
+Stage 3 says *how far from its peers* a record sits. Stage 4 says *what that
+means, given how much the record can be trusted*. It recomputes nothing: every
+number it reads was produced upstream.
+
+### Scope collision, and how it was contained
+
+`Stage4.md` explicitly excludes "Final risk scoring" and "Routing decisions".
+`Stage5.md` owns `R(r)`. `Stage6.md` owns INVESTIGATE / REMEDIATE / MONITOR /
+CLEAR. The Stage 4 brief pulls both into Stage 4. The brief was followed, with
+three containment choices so later stages are not pre-empted:
+
+1. The composed number is **`severity_score`**, never `risk_score`.
+2. The fourth decision class is **`INSUFFICIENT_CONTEXT`**, not Stage 6's
+   `CLEAR` — the vocabularies stay distinct.
+3. Every report labels the output **provisional triage**.
+
+`Stage4.md`'s HHI and temporal-burst signals are **not** built: both require new
+computation over raw data, which the brief forbids.
+
+### Two documented mismatches with the brief
+
+| Brief says | Upstream actually emits | Resolution |
+|---|---|---|
+| `is_duplicate` | `duplicate_flag` | Read the real column |
+| lifecycle `completed` | `terminal` / `pre_completion` / `unknown` | `LIFECYCLE_TERMINAL_STATES` accepts `terminal`, `completed`, `closed` |
+
+### The one rule the design turns on
+
+**Undefined is not zero.** A signal is usable only when its value is finite
+**and** Stage 3 recorded the reason `defined`. Both are checked rather than one
+trusted: if they ever disagree the signal is dropped and the disagreement
+counted, because a contract violation upstream must not become a silent anomaly
+downstream.
+
+Everything else follows from that:
+
+- Severity is a weighted mean over the **valid** signals, renormalised per
+  record, so a record measured on one signal is neither penalised nor flattered.
+- Severity is **NaN, never 0**, when nothing was measurable. A record nobody
+  could check has *unknown* severity, not low severity.
+- Unmeasurable records route to `INSUFFICIENT_CONTEXT`, never `MONITOR` —
+  "monitored" reads as *checked and fine*, which would be a lie.
+- Every explanation carries a **"Not assessed:"** clause naming what could not
+  be measured and why, ending with the sentence that absence of a signal means
+  it could not be measured, not that it was normal.
+
+### Confidence gates interpretation, not value
+
+A low-confidence record keeps its deviations and its severity at **full
+magnitude** — damping them would destroy what a remediator needs. What it
+cannot do is escalate. Routing is a **precedence chain**, not a weighted score,
+so no accumulation of deviations can outvote the gate:
+
+```
+confidence < 0.5              -> REMEDIATE              (applied last; wins outright)
+no valid signal               -> INSUFFICIENT_CONTEXT
+any |z| >= 3.5                -> INVESTIGATE
+otherwise                     -> MONITOR
+```
+
+The threshold is `PEER_STAT_MIN_CONFIDENCE` deliberately: a record not trusted
+to *shape* a peer norm is not trusted to be *accused* by one. The property is
+asserted in code, not merely tested.
+
+### Two design corrections the assertions forced
+
+1. **The duplicate signal can no longer be the sole basis for a severity.** A
+   record with no valid core deviation but a flagged duplicate was getting a
+   severity number — the weak supporting signal driving the whole result,
+   which is exactly what "duplicate is never a primary anomaly" forbids. It now
+   keeps its `duplicate_suspect` type and its score, and has no severity.
+2. **`insufficient_context` now also fires when the work type has no norm at
+   all** (`cluster_has_norm == False`), alongside no-measurable-signal and
+   unstable-cell. Three distinct ways to lack context, all worth saying aloud.
+
+### Files created
+
+| File | Contents |
+|---|---|
+| `src/stage4/anomaly.py` | contract check, signal validation, type classification |
+| `src/stage4/decision.py` | severity composition, confidence-gated routing |
+| `src/stage4/explanation.py` | per-record narrative; recomputes nothing |
+| `src/stage4/pipeline.py` | `AnomalyLayer`, `attach_anomalies`, 13-column contract |
+| `tests/test_stage4.py` | 130 tests |
+
+### Behaviour on 20,000 records (seed 42), 0.98s
+
+| Triage | n | % |
+|---|---|---|
+| MONITOR | 13,541 | 67.70 |
+| INSUFFICIENT_CONTEXT | 3,402 | 17.01 |
+| REMEDIATE | 2,638 | 13.19 |
+| INVESTIGATE | 419 | 2.10 |
+
+419 escalations, **none** on low-confidence evidence. Severity is defined for
+79.22% of records; the other **4,156 have no severity at all** — undefined,
+not zero.
+
+Anomaly types (a record may carry several — no single-score collapse):
+cost_outlier 499, underspend_anomaly 54, duplicate_suspect 36, overspend 24,
+temporal_outlier 5, low_confidence 2,638, insufficient_context 4,290.
+
+### Known limitations
+
+1. **Nothing here is calibrated.** `Z_TYPE_THRESHOLD = 3.0`,
+   `Z_INVESTIGATE_THRESHOLD = 3.5`, `Z_SEVERITY_SCALE = 5.0` and the four
+   severity weights are **judgements, not estimates**. The 2.10% escalation rate
+   is a consequence of those choices, not evidence for them.
+2. **A lifecycle-gated underspend can still escalate on magnitude.** Routing
+   reads `|z|`, so a pre-completion record with `z_spend = -9` is not *accused*
+   of underspending but is still investigated. Deliberate — suppressing a
+   label is not the same as suppressing evidence — and tested as such.
+3. **`duplicate_suspect` inherits Stage 3's ~1% recall.** It is weighted lowest
+   (0.10), cannot escalate alone, and cannot supply context. Its absence means
+   almost nothing.
+4. **17.01% of records reach no conclusion**, driven by Stage 3's deviation
+   definedness (duration 48.05%, spend 62.22%). That is the data's fault, not a
+   pipeline fault, and the system says so rather than defaulting them to safe.
+5. **Explanations report the cell reason for cost** even when the cluster-level
+   fallback was also unavailable; precise, but not exhaustive.
+
+---
+
+## Stage 4 Hardening — measurement, exposure, contract completion
+
+No behaviour changed. The pass added instrumentation, made an implicit state
+explicit, and made an unmeasurable signal measurable. Every pre-existing Stage 4
+column is **byte-identical** with all measurement passes on and off, verified in
+`TestNothingChanged`; the 20,000-record triage distribution is unchanged
+(13,541 / 3,402 / 2,638 / 419).
+
+### One place the brief contradicted itself, and how it was resolved
+
+FIX 2 asks for three things that cannot all hold on one input:
+
+1. `severity_defined = True` **only if** `cluster_has_norm == True`
+2. `severity_defined == False` implies `severity_score is NaN`
+3. existing outputs preserved exactly
+
+A record with a defined deviation but no cluster norm satisfies at most two.
+Enforcing rule 1 would blank an already-computed severity, breaking rule 3 —
+in a brief whose first success criterion is that nothing changes.
+
+**Resolution:** `severity_defined` is read off the severity that was already
+computed, so rule 2 holds *by construction* rather than by enforcement. Rule 1
+is checked against it and any divergence is counted, logged and reported
+(`rule_divergence`) — never silently resolved. On real data the divergence is
+**0**, and structurally must be: `cluster_has_norm` is False only when no
+cluster-wide median exists for any metric, and a peer cell is a subset of its
+cluster, so no cell deviation can be defined either.
+
+### FIX 1 — calibration instrumentation
+
+`src/stage4/calibration.py`, `compute_stage4_calibration_report(df)`. Purely
+descriptive; the module refuses the obvious temptation — reading a p95 back in
+as a threshold would let the corpus define its own normality, so a corpus with
+systematic fraud would calibrate that fraud into the baseline.
+
+Every statistic reports its own `count_defined`, and an empty input returns
+`None`, never `0.0`, because 0.0 reads as a measured value.
+
+**What it immediately exposed.** A single z threshold is applied to three
+signals with completely different tails:
+
+| signal | n defined | abs z p50 | p95 | p99 | at 3.0 | at 3.5 |
+|---|---|---|---|---|---|---|
+| cell_cost | 15,710 | 0.676 | 1.687 | 11.951 | 2.105% | 2.035% |
+| spend_ratio | 12,444 | 0.675 | 2.004 | 2.858 | 0.540% | 0.350% |
+| duration | 9,609 | 0.674 | 1.462 | 1.725 | 0.025% | 0.015% |
+
+Two things fall out of this table that were invisible before:
+
+1. **`Z_TYPE_THRESHOLD = 3.0` is a ~p98 cut for cost and a ~p99.97 cut for
+   duration.** The same nominal threshold is roughly **100x more selective** on
+   one signal than another. Whether that is right is a judgement — but it was
+   being made without anyone seeing it.
+2. **The gap between the type and investigate thresholds barely discriminates
+   for cost** (2.105% vs 2.035%): almost everything that earns the label also
+   escalates. For duration the gap does most of the work.
+
+A third observation is reassuring rather than alarming: abs-z p50 is 0.675 on
+all three signals, and 0.6745 is exactly the median abs-z of a standard normal.
+Stage 3's median/MAD scaling is behaving as designed.
+
+### FIX 2 — explicit severity definedness
+
+Two columns added, `severity_defined` and `severity_defined_reason`, over the
+exhaustive vocabulary `ok / no_peer_norm / cluster_noise / no_valid_deviation /
+insufficient_features`. A NaN severity previously forced the consumer to guess
+whether the record was unmeasurable, noise, or absent from the peer structure.
+Those have different owners and different fixes:
+
+| reason | n | who fixes it |
+|---|---|---|
+| ok | 15,844 | — |
+| no_peer_norm | 1,574 | corpus structure |
+| cluster_noise | 1,524 | naming / clustering |
+| insufficient_features | 1,058 | data entry |
+
+Four assertions now hold on every run: undefined implies NaN, defined implies
+not NaN, defined implies reason is `ok`, undefined implies reason is not `ok`.
+
+### FIX 3 — duplicate observability
+
+`compute_duplicate_diagnostics(df)`. The detector is untouched: same embedding,
+same blocking, same similarity, same 0.85 threshold. `DUPLICATE_SIMILARITY_THRESHOLD`
+already existed and is used everywhere — a test now asserts no literal `0.85`
+survives in `duplicate_detection.py`.
+
+The detector scores `cosine x 1[same district] x exp(-dt/tau)` and retains only
+the product, so *too dissimilar in text* and *too far apart in time* are
+indistinguishable downstream. The diagnostics separate them, over 106,592
+candidate pairs:
+
+| cosine cut | pairs |
+|---|---|
+| 0.60 | 1,406 |
+| 0.70 | 1,406 |
+| 0.80 | 1,404 |
+| 0.85 | 1,404 |
+| 0.90 | 1,404 |
+
+**The distribution is effectively binary.** Two pairs — out of 106,592 — sit
+anywhere in the band [0.60, 0.90). Dropping the cosine threshold from 0.85 to
+0.60 would gain **two pairs**. Threshold tuning cannot fix duplicate recall, and
+now there is a number saying so rather than an intuition.
+
+**Where the recall actually goes.** 1,404 pairs clear 0.85 on text alone;
+**1,386 of them (98.72%) are then killed by the temporal decay term**. With
+`tau = 180` days, a cosine-1.0 pair needs a gap of 29.3 days or less to survive.
+2,532 records have a near-identical partner by text; 36 are flagged.
+
+This does **not** overturn the earlier M2 finding — it sits beside it. They
+measure different populations:
+
+- **Injected near-duplicates** (M2 harness, perturbed text): fail on **text**;
+  only 11.3% reach 0.85 cosine.
+- **Naturally occurring pairs** (this measurement, mostly identical text): clear
+  the text bar easily and fail on **time**.
+
+Two independent bottlenecks, two different fixes. Neither was applied.
+
+`duplicate_reachable` (cosine at or above 0.60) and `duplicate_cosine` are
+attached when diagnostics run. The invariant *flagged implies reachable* holds
+by construction — the decay factor lies in [0,1], so the blended score can
+never exceed its own cosine — and is asserted rather than assumed.
+
+### Files
+
+| File | Change |
+|---|---|
+| `src/stage4/calibration.py` | **new** — calibration report, duplicate diagnostics |
+| `src/stage4/decision.py` | `severity_definedness()` added; no formula touched |
+| `src/stage4/pipeline.py` | 2 contract columns, 2 config flags, 6 invariants, 2 reports |
+| `src/core/constants.py` | hardening block; no existing constant altered |
+| `main.py` | `--duplicate-diagnostics`; two new report sections |
+| `tests/test_stage4_hardening.py` | **new** — 67 tests |
+
+811 tests pass (744 + 67). The 130 existing Stage 4 tests were **not modified**.
+
+### One bug this pass introduced and caught
+
+`records = diagnostics["records"]` in the new CLI block shadowed
+`records = corpus.records`, crashing the worked-examples section — but only
+under `--duplicate-diagnostics`, which is why the default path stayed green.
+Caught by running the flag end-to-end rather than trusting the test suite.
+
+### Did any metric improve?
+
+**No.** Every decision, severity and flag is byte-identical. The only figures
+that moved are ones that did not exist before. This was checked, not assumed:
+`test_pre_hardening_columns_are_byte_identical` compares all 13 pre-existing
+columns with instrumentation on and off.
+
+### Known limitations after hardening
+
+1. **Still nothing is calibrated.** The report makes the thresholds arguable; it
+   does not make them right. `Z_TYPE_THRESHOLD`, `Z_INVESTIGATE_THRESHOLD`,
+   `Z_SEVERITY_SCALE` and the four severity weights remain judgements.
+2. **The per-signal selectivity gap above is unaddressed.** Fixing it means
+   per-signal thresholds — a behaviour change, out of scope here.
+3. **Duplicate recall is measured, not fixed**, as instructed. The measurement
+   says the fix is `tau` or the blending rule, not the cosine threshold.
+4. **`DUPLICATE_REACHABLE_THRESHOLD = 0.60` is itself a judgement.** It is a
+   diagnostic cut with no effect on detection, but it is not derived.
+5. **The diagnostics rebuild Stage 3's duplicate embedding** because Stage 3
+   does not retain it. Deterministic and identical, but it is recomputation —
+   accepted because it produces no pipeline output.
+6. Stage 3 audit findings **N1–N4 remain open**.
+
+---
+
+## Stages 5–7
 
 Not started. Strict order is enforced: no stage begins until the previous one's
 tests pass.

@@ -883,8 +883,12 @@ class TestExplanationInputs:
 
     def test_undefined_deviations_are_explained_in_words(self, result: Any) -> None:
         frame = result.frame
+        # Must not be a noise record: since AUDIT M1 those report the more
+        # fundamental "cluster_noise" instead, which is a different case.
         unstable = frame.loc[
-            ~frame["peer_cell_stable"] & frame["log_cost"].notna()
+            ~frame["peer_cell_stable"]
+            & frame["log_cost"].notna()
+            & ~frame["cluster_is_noise"]
         ].index[0]
         payload = result.explain(unstable)
         entry = payload["deviations"]["deviation_cell_cost"]
@@ -1077,7 +1081,10 @@ class TestEdgeCases:
         assert outcome.frame["deviation_cell_cost"].isna().all()
         assert (
             outcome.frame["deviation_cell_cost_reason"].isin(
-                ["no_peer_norm", "cell_unstable", "feature_missing"]
+                # "cluster_noise" since AUDIT M1: this fixture is a single work
+                # type, so every record is unclustered and that is the precise
+                # cause, superseding the generic "cell_unstable".
+                ["no_peer_norm", "cell_unstable", "feature_missing", "cluster_noise"]
             )
         ).all()
 
