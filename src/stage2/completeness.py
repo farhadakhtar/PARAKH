@@ -1,29 +1,47 @@
-"""C_comp - evidentiary completeness (Stage2.md sec.5.2).
+"""C_comp - evidentiary completeness (Stage2.md sec.5.2, refined in v2).
 
-    C_comp(r) = sum_f v_f * kappa(rho_f(r)) / sum_f v_f
-    v_f       = (1 - H_null(f)) * H_value(f)
+    C_comp(r) = [ sum_f v_f * kappa(rho_f(r)) / sum_f v_f ] * cluster(r)
+    v_f       = criticality_f * H_value(f)
+    cluster(r)= exp(-delta * max(0, m - 1)),  m = sum over critical f of
+                                                 (1 - kappa(rho_f))
 
-What this actually measures
----------------------------
-Not "how many fields are filled in". It measures **surprisal-weighted**
-incompleteness: is this record unusually incomplete *relative to the corpus's
-own filing habits*?
+What changed, and why
+---------------------
+v1 weighted fields by ``(1 - H_null(f)) * H_value(f)``, a surprisal argument:
+an absence is informative only if absences are rare. Measured on the 20k
+corpus, that produced a badly distorted basis:
 
-The ``(1 - H_null)`` term is the device that makes that true, and it is the
-subtlest thing in Stage 2. A field that is null 26% of the time has a
-high-entropy - unpredictable - fill pattern, so its absence from any one record
-tells you almost nothing: absence is simply how that register behaves. A field
-that is normally always filled being absent *is* a strong signal.
+    work_id (never null, proves nothing)   18.11% of all weight
+    all three dates + both amounts         30.56% between them
+    vendor_name (missing 26% of the time)   2.12%
 
-This is deliberate, and it is the README's central thesis applied to the
-confidence layer. A completeness score that punished records for lacking a
-field nobody in that district ever fills would be encoding **administrative
-capacity**, which is precisely the artifact PARAKH exists not to learn.
+and an algebraic floor of 0.3449 = 0.1811 (work_id) + 0.20 * 0.8189 (the
+missing-credit), against an observed range of [0.5150, 1.0] with sd 0.0670.
+C_comp contributed only 1.77% of the variance of log C: it was very nearly a
+constant.
 
-The corollary is that C_comp has a narrow dynamic range with a structural floor
-well above zero, so theta_C must be calibrated against the empirical
-distribution and never against an absolute intuition such as "0.5 means half
-the data is there". :meth:`FieldWeights.structural_floor` reports that floor.
+Two faults, one fix each:
+
+* **The identifier dominated.** Stage 1 guarantees ``work_id`` is never null,
+  so whatever weight it holds is an identical constant added to every record -
+  pure range compression, zero discriminating power. Criticality puts it at
+  0.05, alongside the other descriptive fields.
+* **The evidentiary spine was starved.** ``(1 - H_null)`` systematically
+  down-weighted exactly the fields most likely to be absent. Criticality states
+  the domain judgement directly: dates and money are what evidence a public
+  work, and they now hold 72% of the basis.
+
+On the artifact-invariance question
+-----------------------------------
+v1 defended ``(1 - H_null)`` as preventing the score from encoding
+administrative capacity. That defence was misapplied. README sec.9 places the
+artifact-invariance guarantee on **R**, not **C**, and a low-confidence record
+routes to REMEDIATE rather than INVESTIGATE. Confidence is *supposed* to track
+documentation quality - that is what it measures - and suppressing it solved a
+problem the routing layer already solves, at the cost of making the component
+nearly inert. ``H_value`` is retained because it correctly zeroes constant,
+non-informative fields and keeps the degenerate-corpus fallback working; v1's
+weighting remains available verbatim via ``weight_mode="entropy"``.
 """
 
 from __future__ import annotations
@@ -36,8 +54,14 @@ import numpy as np
 import pandas as pd
 
 from src.core.constants import (
+    CLUSTER_PENALTY_ALLOWANCE,
+    CLUSTER_PENALTY_DELTA,
     COMPLETENESS_CREDIT,
     COMPLETENESS_REQUIRE_EVIDENCE,
+    COMPLETENESS_WEIGHT_MODE,
+    COMPLETENESS_WEIGHT_MODES,
+    CRITICAL_FIELDS,
+    FIELD_CRITICALITY,
     ENTROPY_NORMALIZATION,
     ENTROPY_NORMALIZATIONS,
     MIN_FIELD_COVERAGE,
@@ -138,6 +162,8 @@ class FieldWeights:
     coverage: Mapping[str, float]
     n_distinct: Mapping[str, int]
     normalization: str
+    criticality: Mapping[str, float] = field(default_factory=dict)
+    weight_mode: str = COMPLETENESS_WEIGHT_MODE
     excluded_fields: Tuple[str, ...] = ()
     degenerate: bool = False
     n_records: int = 0
@@ -182,6 +208,7 @@ class FieldWeights:
         """JSON-serialisable description."""
         return {
             "normalization": self.normalization,
+            "weight_mode": self.weight_mode,
             "degenerate": self.degenerate,
             "excluded_fields": list(self.excluded_fields),
             "total_weight": round(self.total, 6),
@@ -194,6 +221,7 @@ class FieldWeights:
                     "h_null": round(self.h_null.get(name, 0.0), 6),
                     "h_value": round(self.h_value.get(name, 0.0), 6),
                     "coverage": round(self.coverage.get(name, 0.0), 6),
+                    "criticality": round(self.criticality.get(name, 0.0), 6),
                     "n_distinct": int(self.n_distinct.get(name, 0)),
                 }
                 for name in self.weights
@@ -251,6 +279,9 @@ def compute_field_weights(
     normalization: str = ENTROPY_NORMALIZATION,
     min_coverage: float = MIN_FIELD_COVERAGE,
     schema: Schema = SCHEMA,
+    weight_mode: str = COMPLETENESS_WEIGHT_MODE,
+    criticality: Mapping[str, float] = FIELD_CRITICALITY,
+    reasons: Optional[pd.DataFrame] = None,
 ) -> FieldWeights:
     """Estimate ``v_f = (1 - H_null(f)) * H_value(f)`` across the corpus.
 
@@ -260,6 +291,13 @@ def compute_field_weights(
         normalization: How ``H_value`` is scaled into [0, 1].
         min_coverage: Fields present in a smaller share of records are dropped.
         schema: Schema supplying the default field basis.
+        weight_mode: ``"criticality"`` (default) uses
+            ``criticality_f * H_value(f)``; ``"entropy"`` reproduces v1's
+            ``(1 - H_null(f)) * H_value(f)``; ``"hybrid"`` multiplies all
+            three factors.
+        criticality: Per-field domain weight, used by the criticality and
+            hybrid modes.
+        reasons: Precomputed null-reason frame, to avoid a redundant pass.
 
     Returns:
         Frozen :class:`FieldWeights`.
@@ -273,9 +311,15 @@ def compute_field_weights(
         weighting is a refinement; when it degenerates, fall back rather than
         emit a meaningless number.
     """
+    if weight_mode not in COMPLETENESS_WEIGHT_MODES:
+        raise ValueError(
+            f"weight_mode must be one of {COMPLETENESS_WEIGHT_MODES}, "
+            f"got {weight_mode!r}"
+        )
     basis = list(fields) if fields is not None else list(schema.names)
     n_records = len(frame)
-    reasons, _ = resolve_reasons(frame, basis)
+    if reasons is None:
+        reasons, _ = resolve_reasons(frame, basis)
 
     weights: Dict[str, float] = {}
     h_null: Dict[str, float] = {}
@@ -306,7 +350,19 @@ def compute_field_weights(
             weights[name] = 0.0
             continue
 
-        weights[name] = (1.0 - entropy_null) * entropy_value
+        # v1 used (1 - H_null) alone, which down-weighted precisely the
+        # fields most likely to be absent: the three dates and two amounts
+        # held 30.56% of total weight while work_id - never null, and so
+        # incapable of discriminating between any two records - held
+        # 18.11%. Criticality states the same judgement directly instead of
+        # inferring a proxy for it from the null pattern.
+        crit = float(criticality.get(name, 0.0))
+        if weight_mode == "criticality":
+            weights[name] = crit * entropy_value
+        elif weight_mode == "hybrid":
+            weights[name] = crit * (1.0 - entropy_null) * entropy_value
+        else:  # "entropy" - v1 behaviour, retained and reproducible
+            weights[name] = (1.0 - entropy_null) * entropy_value
 
     degenerate = sum(weights.values()) <= 0.0
     if degenerate:
@@ -332,6 +388,8 @@ def compute_field_weights(
         coverage=coverage,
         n_distinct=n_distinct,
         normalization=normalization,
+        criticality={name: float(criticality.get(name, 0.0)) for name in basis},
+        weight_mode=weight_mode,
         excluded_fields=tuple(excluded),
         degenerate=degenerate,
         n_records=n_records,
@@ -347,6 +405,7 @@ def credit_matrix(
     frame: pd.DataFrame,
     fields: Sequence[str],
     credit: Mapping[str, float] = COMPLETENESS_CREDIT,
+    reasons: Optional[pd.DataFrame] = None,
 ) -> np.ndarray:
     """Map every cell's null reason onto its evidentiary credit.
 
@@ -357,11 +416,14 @@ def credit_matrix(
         frame: Scoring frame.
         fields: Field basis, defining column order of the result.
         credit: ``NullReason.value -> credit`` mapping.
+        reasons: Precomputed null-reason frame. Supplying it avoids a
+            redundant second pass when the caller already has one.
 
     Returns:
         ``(n_records, len(fields))`` float array of credits in [0, 1].
     """
-    reasons, _ = resolve_reasons(frame, fields)
+    if reasons is None:
+        reasons, _ = resolve_reasons(frame, fields)
     n_records = len(frame)
     matrix = np.zeros((n_records, len(fields)), dtype="float64")
     if n_records == 0:
@@ -404,6 +466,25 @@ class CompletenessResult:
     n_valid_fields: pd.Series = field(default_factory=lambda: pd.Series(dtype="int64"))
     #: Rows forced to zero because no field carried any evidence at all.
     no_evidence: pd.Series = field(default_factory=lambda: pd.Series(dtype=bool))
+    #: Fractional count of critical fields lacking usable evidence.
+    critical_deficit: pd.Series = field(
+        default_factory=lambda: pd.Series(dtype="float64")
+    )
+    #: Multiplicative cluster penalty applied to the weighted average.
+    cluster_factor: pd.Series = field(
+        default_factory=lambda: pd.Series(dtype="float64")
+    )
+    #: Integer count of critical fields lacking usable evidence.
+    #:
+    #: Reported alongside :attr:`critical_deficit` rather than instead of it.
+    #: The deficit is FRACTIONAL - it sums ``1 - kappa`` so the
+    #: missing/placeholder/unparseable ordering flows into the cluster term -
+    #: and is what the formula uses. This count is the human-readable
+    #: companion, and the two deliberately disagree: three placeholders are a
+    #: count of 3 but a deficit of 2.76.
+    critical_missing_count: pd.Series = field(
+        default_factory=lambda: pd.Series(dtype="int64")
+    )
 
     @property
     def defined(self) -> pd.Series:
@@ -433,6 +514,11 @@ def compute_completeness_result(
     min_coverage: float = MIN_FIELD_COVERAGE,
     require_evidence: bool = COMPLETENESS_REQUIRE_EVIDENCE,
     schema: Schema = SCHEMA,
+    weight_mode: str = COMPLETENESS_WEIGHT_MODE,
+    criticality: Mapping[str, float] = FIELD_CRITICALITY,
+    critical_fields: Sequence[str] = CRITICAL_FIELDS,
+    cluster_delta: float = CLUSTER_PENALTY_DELTA,
+    cluster_allowance: float = CLUSTER_PENALTY_ALLOWANCE,
 ) -> CompletenessResult:
     """Compute ``C_comp`` for every record, with full diagnostics.
 
@@ -448,25 +534,39 @@ def compute_completeness_result(
             field at all. See
             :data:`~src.core.constants.COMPLETENESS_REQUIRE_EVIDENCE`.
         schema: Schema supplying the default basis.
+        weight_mode: How ``v_f`` is formed.
+        criticality: Per-field domain weight.
+        critical_fields: Fields counted by the cluster penalty.
+        cluster_delta: Cluster decay rate.
+        cluster_allowance: Critical deficit tolerated before the cluster
+            penalty engages.
 
     Returns:
         :class:`CompletenessResult` whose ``scores`` share the frame's index.
     """
     basis = tuple(fields) if fields is not None else tuple(schema.names)
+    # Single null-reason pass, shared by the weight estimator and the credit
+    # matrix. Both previously derived their own copy of the same frame.
+    reasons, derived = resolve_reasons(frame, basis)
     resolved_weights = weights or compute_field_weights(
         frame,
+        reasons=reasons,
         fields=basis,
         normalization=normalization,
         min_coverage=min_coverage,
         schema=schema,
+        weight_mode=weight_mode,
+        criticality=criticality,
     )
-    _, derived = resolve_reasons(frame, basis)
 
     weight_vector = resolved_weights.as_array(basis)
     total_weight = float(weight_vector.sum())
-    credits = credit_matrix(frame, basis, credit=credit)
+    credits = credit_matrix(frame, basis, credit=credit, reasons=reasons)
 
     no_evidence = pd.Series(False, index=frame.index, dtype=bool)
+    critical_deficit = pd.Series(0.0, index=frame.index, dtype="float64")
+    cluster_factor = pd.Series(1.0, index=frame.index, dtype="float64")
+    critical_missing_count = pd.Series(0, index=frame.index, dtype="int64")
 
     if len(frame) == 0:
         scores = pd.Series([], dtype="float64", index=frame.index)
@@ -484,6 +584,36 @@ def compute_completeness_result(
         counts = pd.Series(
             present_matrix.sum(axis=1), index=frame.index, dtype="int64"
         )
+
+        # --- cluster penalty ------------------------------------------------
+        # Evidence loss is super-additive. Losing one milestone date is a gap;
+        # losing all three dates and both amounts destroys the record's ability
+        # to be cross-checked at all, and a linear weighted average cannot
+        # express that. The deficit is FRACTIONAL - built from the same credit
+        # vector as the numerator - so the missing < placeholder < unparseable
+        # ordering flows into the cluster term as well.
+        critical_positions = [
+            index for index, name in enumerate(basis) if name in set(critical_fields)
+        ]
+        if critical_positions:
+            critical_missing_count = pd.Series(
+                (~present_matrix[:, critical_positions]).sum(axis=1),
+                index=frame.index,
+                dtype="int64",
+            )
+        if critical_positions and cluster_delta > 0.0:
+            deficit = (1.0 - credits[:, critical_positions]).sum(axis=1)
+            critical_deficit = pd.Series(
+                deficit, index=frame.index, dtype="float64"
+            )
+            factor = np.exp(
+                -cluster_delta * np.maximum(0.0, deficit - cluster_allowance)
+            )
+            cluster_factor = pd.Series(
+                np.clip(factor, 0.0, 1.0), index=frame.index, dtype="float64"
+            )
+            raw = raw * cluster_factor.to_numpy()
+
         if require_evidence:
             # No present field anywhere in the basis -> no evidence base -> the
             # residual credits are a fraction of nothing. Refuse.
@@ -507,6 +637,9 @@ def compute_completeness_result(
         reasons_derived=derived,
         n_valid_fields=counts,
         no_evidence=no_evidence,
+        critical_deficit=critical_deficit,
+        cluster_factor=cluster_factor,
+        critical_missing_count=critical_missing_count,
     )
 
 

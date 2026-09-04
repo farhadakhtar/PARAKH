@@ -267,6 +267,197 @@ Without these:
 
 ---
 
+---
+
+# Stage 2 — Confidence Engine: Operating Semantics
+
+Everything below describes **implemented, tested behaviour** of
+`src/stage2/`, not intent. Where a number is quoted it was measured on the
+20,000-record reference corpus (`seed=42`).
+
+---
+
+## 1. Confidence Interpretation
+
+> **High confidence does not mean clean data.**
+> It means: *internally consistent given the available evidence.*
+
+\(C(r)\) answers one question only:
+
+> If we asserted something about this record, could we defend the assertion
+> with the evidence in hand?
+
+This is a statement about the **evidentiary state of a record**, not about the
+world. The consequences are deliberate and must not be read as bugs:
+
+| situation | score | why |
+| --- | --- | --- |
+| Genuine fraud, filed perfectly | **high** | The evidence is intact. Detecting the fraud is \(R\)'s job, not \(C\)'s |
+| An honest culvert, three placeholders and a reversed date | **near zero** | Nothing here can be defended |
+| A record with almost nothing in it | **near zero** | Absence of evidence is not evidence of correctness |
+| A record with *no* dates at all | temporal **dropped**, not scored 1.0 | Nothing to check is not the same as coherent |
+
+That inversion is the design. PARAKH refuses to allege on evidence it cannot
+stand behind, and confidence is the gate that enforces it.
+
+**A high \(C\) is a licence to reason about a record. It is not a clean bill of
+health.**
+
+---
+
+## 2. Lifecycle Awareness
+
+\(C_{\text{recon}}\) reads Stage 1's `status` field, because the same spend
+ratio means different things at different stages of a work's life.
+
+| lifecycle | statuses | underspend | overspend |
+| --- | --- | --- | --- |
+| pre-completion | `proposed`, `approved`, `pending`, `ongoing`, `in progress` | **not penalised** | penalised |
+| terminal | `completed`, `closed` | fully penalised | penalised |
+| unknown | null, placeholder, unparseable, unrecognised | **half** penalised | penalised |
+
+**Why proposed works are not penalised for low spend.** A work that has been
+proposed but not executed *should* show near-zero expenditure. Charging it
+would be penalising a record for behaving correctly — and worse, it would make
+confidence a proxy for project age rather than for data reliability.
+
+**Why overspend is always penalised.** Spending beyond the sanctioned amount is
+not a reporting quirk at any stage. It requires a sanction revision, and that
+revision should itself be on the record. Its absence is a real signal, so the
+overspend term is never gated by status.
+
+**Why unknown gets half.** When the stage cannot be determined we do not know
+whether the gap is legitimate, so the model neither excuses nor condemns it.
+
+---
+
+## 3. Tolerance Behaviour
+
+Overspend is measured from \(1 + \tau\), with \(\tau = 0.05\):
+
+$$\text{overspend penalty} = \exp\big(-\lambda \cdot \max(0,\; r - (1+\tau))\big)$$
+
+| \(r\) | 1.00 | 1.02 | 1.05 | 1.06 | 1.20 | 2.00 |
+| --- | --- | --- | --- | --- | --- | --- |
+| \(C_{\text{recon}}\) | 1.000 | **1.000** | **1.000** | 0.980 | 0.741 | 0.150 |
+
+**Why small overspend is ignored.** Rounding, minor price variation and
+final-bill adjustment routinely put a public work a percent or two over its
+sanction. Penalising from the first rupee treated ordinary accounting noise as
+a control failure and charged 3,178 records in the reference corpus for it.
+\(\tau\) marks where accounting noise ends and a control failure begins.
+
+Underspend has a matching threshold: it is free down to \(\theta_u = 0.2\), and
+penalised below it — a work reported against a sanction while having consumed
+under a fifth of it asserts something the money does not support.
+
+---
+
+## 4. Garbage Handling
+
+Unusable financial values are **refused, not discounted**:
+
+| condition | \(C_{\text{recon}}\) | effect on \(C\) |
+| --- | --- | --- |
+| `inf` / `-inf` (e.g. an overflowing literal) | **0.0** | \(C = 0\) by zero dominance |
+| \(\lvert x\rvert >\) `IMPLAUSIBLE_AMOUNT_THRESHOLD` (1e15) | **0.0** | \(C = 0\) |
+| sanction \(\le 0\) | 0.25 | strong penalty |
+
+A moderate score on an unreadable number lets garbage survive aggregation. An
+interim value of 0.25 for non-finite amounts was tried and rejected in audit for
+exactly that reason.
+
+The implausibility branch exists because `1e300` is *finite* and slips past a
+non-finite check: a `1e300` sanction against a `1e300` spend gives \(r = 1.0\)
+and would otherwise score a **perfect** reconciliation on two data-entry
+accidents.
+
+---
+
+## 5. Calibration Disclaimer
+
+> ### Confidence scores are comparative, not absolute.
+> ### The system requires real-world calibration to be operational.
+
+A score of 0.83 does **not** mean "83% trustworthy". It means this record ranks
+where it ranks *against this corpus, under these parameters*. Specifically:
+
+- **\(C_{\text{comp}}\) is corpus-relative.** Field weights \(v_f\) are
+  estimated from the corpus, so the same record scores differently in a
+  different corpus. Weights are frozen and emitted with every score set
+  (`outputs/stage2_field_weights.json`) and can be re-injected via
+  `ConfidenceModel.score(..., field_weights=...)` to keep batches comparable.
+- **Every parameter is a default, not an estimate**: \(w\), \(\kappa\),
+  \(\lambda\), \(\gamma\), \(\delta\), \(\tau\), \(\theta_u\) and the
+  null-reason credits. None has been fitted to observed data.
+- **\(\theta_C\) must be set from the empirical distribution**, never from an
+  absolute intuition such as "0.5 means half the data is there".
+- **The reference corpus is synthetic.** No real MPLADS export has been scored.
+
+Until calibrated, the scores are **structurally correct and operationally
+meaningless** — usable for ranking and triage, not for any absolute claim about
+a record.
+
+---
+
+## 6. Stage 3 Contract
+
+### What Stage 3 may rely on
+
+| guarantee | detail |
+| --- | --- |
+| **Range** | `confidence` \(\in [0,1]\). Never NaN, never inf — asserted in `ConfidenceModel.score` |
+| **Monotonicity** | Lower means less trustworthy. Verified against Stage 1's ground-truth ledger: no injected defect 0.994 → missing 0.777 → date-order 0.491 → unparseable 0.351 → pre-scheme 0.098 |
+| **Zero means reject** | `confidence == 0.0` is a refusal, not a low score. Reached only by an unevidenced record or a refused component. Never route a zero to INVESTIGATE |
+| **Alignment** | Row count, order and index identical to `corpus.records`; `attach_confidence` raises rather than misalign |
+| **Determinism** | Same corpus, same config, same bytes. No wall-clock, no RNG |
+| **Breakdown** | All 17 columns of `BREAKDOWN_COLUMNS` are present after `attach_confidence` |
+
+### The columns
+
+```
+confidence  completeness  temporal  reconciliation
+completeness_defined  temporal_defined  reconciliation_defined  n_components_used
+n_valid_fields  critical_missing_count  critical_deficit  cluster_penalty_factor
+temporal_pairs_evaluated  temporal_hard_fail
+reconciliation_branch  lifecycle_state  spend_ratio
+```
+
+### > Stage 3 MUST use the breakdown, not only the scalar confidence.
+
+The scalar is a summary and it is lossy. Three cases where reading it alone
+gives the wrong answer:
+
+1. **`temporal = 1.0` can mean "coherent" or "nothing to check".** Only
+   `temporal_pairs_evaluated` and `temporal_defined` separate them. 16.4% of
+   the reference corpus has no evaluable milestone pair.
+2. **Two records at \(C = 0\) are not alike.** One may have a fabricated
+   timeline (`temporal_hard_fail`), another an unreadable amount
+   (`reconciliation_branch == "non_finite"`). They belong in different
+   remediation queues.
+3. **A low `reconciliation` may be entirely legitimate.** Check
+   `lifecycle_state` before treating a low `spend_ratio` as a signal.
+
+`n_components_used < 3` means a component was **dropped as unmeasurable** and
+the weights renormalised for that record — not that it scored badly.
+
+### Explaining a record
+
+`explain_confidence(records, row)` returns a JSON-serialisable dict with
+per-component scores, effective weights, penalty attribution, the evidence
+behind each component and ordered human-readable reasons. It **reads stored
+outputs and recomputes nothing**, so an explanation can never disagree with the
+score it explains.
+
+```python
+from src.stage2.confidence import attach_confidence, explain_confidence
+
+result = attach_confidence(corpus)
+explain_confidence(corpus.records, 0)["summary"]
+# 'Confidence refused (0.0): temporal could not be evidenced at all,
+#  and no other component can compensate for it.'
+```
+
 ## Limitations
 
 * No beneficial ownership → no true collusion detection

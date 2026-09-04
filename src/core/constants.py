@@ -286,12 +286,23 @@ LOG_DATE_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%S"
 # words, "operationally meaningless" until calibrated.
 # ===========================================================================
 
-STAGE2_VERSION: Final[str] = "stage2.confidence.v1"
+STAGE2_VERSION: Final[str] = "stage2.confidence.v2"
 
 # --- aggregation -----------------------------------------------------------
 
 #: (w_comp, w_temp, w_recon). Must be non-negative and sum to 1.
-CONFIDENCE_WEIGHTS: Final[tuple[float, float, float]] = (1 / 3, 1 / 3, 1 / 3)
+# REFINEMENT (stage2.confidence.v2): rebalanced from equal thirds.
+#
+# Measured on the v1 engine, the variance decomposition of log C was
+# temporal 50.3% / reconciliation 48.0% / completeness 1.8% - two components
+# carried 98.2% of all ranking signal. C_recon is also the weakest *evidence*:
+# it rests on a single budget-vs-outcome comparison whose semantics are
+# approximate (see RECON_MODE), whereas completeness and temporal coherence
+# rest on direct field-level observation. It therefore gets the smaller weight.
+CONFIDENCE_WEIGHTS: Final[tuple[float, float, float]] = (0.4, 0.4, 0.2)
+
+#: v1 weights, retained so the previous behaviour is exactly reproducible.
+CONFIDENCE_WEIGHTS_V1: Final[tuple[float, float, float]] = (1 / 3, 1 / 3, 1 / 3)
 
 #: Tolerance when checking that the weights sum to one.
 WEIGHT_SUM_TOLERANCE: Final[float] = 1e-9
@@ -379,15 +390,14 @@ TEMPORAL_HARD_FAIL_ON_FUTURE: Final[bool] = False
 
 # --- reconciliation --------------------------------------------------------
 
-#: Disagreement penalty rate.
+#: Overspend decay rate for the plausibility model, and the legacy
+#: disagreement rate under RECON_MODE = "agreement".
 #:
-#: WARNING (semantic, not numerical): sanction_amount is a BUDGET and
-#: amount_spent is an OUTCOME. They are not two independent measurements of one
-#: quantity, so a routine underspend is charged as if it were a data
-#: contradiction. At lambda = 2.0 a 30% underspend costs ~30% of C_recon. The
-#: schema offers no genuine second source, so this is implemented as specified,
-#: but lambda must be calibrated against the observed underspend distribution
-#: rather than accepted at 2.0.
+#: HISTORY: under the v1 equality model this penalised any divergence between
+#: budget and outcome, so a routine 30% underspend cost ~30% of C_recon. The
+#: plausibility model retired that reading - underspend is now free down to
+#: RECON_UNDERSPEND_FLOOR and gated on lifecycle stage, and lambda applies only
+#: past RECON_OVERSPEND_TOLERANCE. Calibration target regardless.
 RECON_LAMBDA: Final[float] = 2.0
 
 #: Stabiliser in the denominator; also makes 0-vs-0 well defined without a branch.
@@ -399,7 +409,16 @@ RECON_EPSILON: Final[float] = 1e-6
 #: a realistically dirty corpus and caps those records at 0.2^(1/3) = 0.585 no
 #: matter how perfect everything else is. Stage2.md words it as "e.g. 0.2" - a
 #: suggestion, not a derivation. Prime candidate for calibration.
-RECON_ONE_SIDED_CREDIT: Final[float] = 0.2
+# REFINEMENT: raised 0.2 -> 0.7.
+#
+# HISTORY: the old value of 0.2 fired on 28.27% of the corpus and, under the
+# equal 1/3 weights then in force, capped every one of those records at
+# 0.2^(1/3) = 0.585 however sound the rest of the record was. Those 4,255
+# records formed 96.1% of the [0.5,0.6) histogram bin - an artefact spike
+# manufactured by one hard-coded constant rather than by anything about the
+# records themselves. One absent amount is a partial-information penalty, not
+# a verdict.
+RECON_ONE_SIDED_CREDIT: Final[float] = 0.7
 
 #: Score when both amounts are null: nothing is asserted, so nothing can
 #: contradict. Per Stage2.md sec.5.4 ("Both values null -> ignore component").
@@ -407,6 +426,13 @@ RECON_BOTH_NULL_CREDIT: Final[float] = 1.0
 
 #: Score when either amount is non-finite. Explicit, because the symmetric
 #: ratio evaluates inf/inf = NaN, which would silently poison the log-sum.
+# CORRECTION (audit finding 3): restored to 0.0.
+#
+# History: v1 used 0.0, the v2 refinement brief asked for a "strong penalty
+# (<0.3)" and it became 0.25. The audit found that too weak - a record whose
+# amount is literally infinite was still able to produce moderate confidence,
+# because 0.25 does not trigger zero-dominance. Garbage must be refused, not
+# discounted. Back to 0.0.
 RECON_NON_FINITE_CREDIT: Final[float] = 0.0
 
 #: Denominator form.
@@ -429,3 +455,188 @@ CONFIDENCE_HISTOGRAM_BINS: Final[int] = 10
 
 #: Stage2.md sec.7: 50k records scored in under 3 seconds.
 CONFIDENCE_SECONDS_BUDGET: Final[float] = 3.0
+
+# ===========================================================================
+# STAGE 2 REFINEMENT (stage2.confidence.v2)
+#
+# Three corrections to the v1 engine, each traced to a measurement:
+#
+#   1. C_recon was an EQUALITY test on a budget-vs-outcome pair. 74.57% of
+#      comparable records sit in the normal execution band (0.2 <= r <= 1.0)
+#      and were charged a mean penalty of 0.8875 for behaving correctly. It is
+#      now a PLAUSIBILITY test.
+#   2. Var(log C) decomposed as temporal 50.3% / recon 48.0% / comp 1.8%.
+#      Weights rebalanced to (0.4, 0.4, 0.2) and the one-sided credit raised.
+#   3. C_comp had an algebraic floor of 0.3449 (observed min 0.5150) because
+#      work_id - never null, proving nothing - carried 18.11% of all weight
+#      while the three dates and two amounts carried 30.56% between them.
+#
+# A later audit round added the lifecycle gate, the overspend tolerance and
+# the restoration of outright refusal for garbage; see the STAGE 2 FINAL
+# CORRECTIONS block at the end of this module.
+# ===========================================================================
+
+STAGE2_REFINEMENT_VERSION: Final[str] = "stage2.confidence.v2"
+
+# --- C_recon: financial plausibility ---------------------------------------
+
+#: Scoring semantics for reconciliation.
+#:   "plausibility" - r = spent / (sanction + eps), asymmetric penalties.
+#:                    Overspend is a control failure; underspend is normal
+#:                    until it becomes implausible. This is the v2 default.
+#:   "agreement"    - the v1 symmetric |x1-x2|/(|x1|+|x2|+eps) equality test,
+#:                    retained so v1 behaviour is exactly reproducible and the
+#:                    two can be compared on the same corpus.
+RECON_MODE: Final[str] = "plausibility"
+RECON_MODES: Final[tuple[str, ...]] = ("plausibility", "agreement")
+
+#: Overspend decay. r = 1.10 -> 0.819;  r = 1.50 -> 0.368;  r = 2.00 -> 0.135.
+#: Spending beyond sanction is not a reporting quirk: it requires a sanction
+#: revision that should itself be on record, so its absence is a real signal.
+RECON_OVERSPEND_LAMBDA: Final[float] = RECON_LAMBDA
+
+#: Underspend is unpenalised until the ratio falls below this floor. Set at
+#: 0.2 because a work reported against a sanction while having consumed under a
+#: fifth of it is asserting something the money does not support. Measured: only
+#: 0.62% of comparable records fall below it, against 74.57% in the band above.
+RECON_UNDERSPEND_FLOOR: Final[float] = 0.2
+
+#: Underspend decay, applied to max(0, floor - r), whose range is [0, 0.2] for
+#: non-negative spend. gamma = 6.0 places total underspend (r = 0) at
+#: exp(-1.2) = 0.301 - deliberately the same severity tier as a non-finite
+#: amount, since both say the financial record cannot be believed.
+RECON_UNDERSPEND_GAMMA: Final[float] = 6.0
+
+#: Score when sanction <= 0, which makes the ratio meaningless.
+#:
+#: BEHAVIOUR CHANGE from v1: sanction = spent = 0 previously scored 1.0
+#: ("zero equals zero, perfect agreement"). Under a plausibility reading a
+#: non-positive budget is not plausible, so it is penalised. This follows
+#: directly from the redefinition and is covered by an updated test.
+RECON_NON_POSITIVE_SANCTION_CREDIT: Final[float] = 0.25
+
+# --- C_comp: criticality weighting ------------------------------------------
+
+#: How field weights v_f are formed.
+#:   "criticality" - v_f = criticality_f * H_value(f). The v2 default.
+#:   "entropy"     - v_f = (1 - H_null(f)) * H_value(f). The v1 behaviour.
+#:   "hybrid"      - the product of all three factors.
+#:
+#: Why criticality replaces (1 - H_null): that term down-weighted precisely the
+#: fields most likely to be absent, so the evidentiary spine of a work (dates
+#: and money) ended up holding 30.56% of weight while the identifier held
+#: 18.11%. It was defended as an artifact-invariance device, but README sec.9
+#: places that guarantee on R, not C, and low-confidence records route to
+#: REMEDIATE rather than INVESTIGATE. Confidence is *supposed* to track
+#: documentation quality; suppressing that solved a problem the routing layer
+#: already solves, at the cost of making C_comp nearly constant.
+COMPLETENESS_WEIGHT_MODE: Final[str] = "criticality"
+COMPLETENESS_WEIGHT_MODES: Final[tuple[str, ...]] = (
+    "criticality",
+    "entropy",
+    "hybrid",
+)
+
+#: Fields whose absence removes the evidentiary spine of a work: when it was
+#: proposed, sanctioned and completed, and what it cost.
+CRITICAL_FIELDS: Final[tuple[str, ...]] = (
+    "date_proposal",
+    "date_approval",
+    "date_completion",
+    "sanction_amount",
+    "amount_spent",
+)
+
+#: Per-field criticality. Critical fields 0.15-0.20; everything else 0.05.
+#:
+#: work_id sits at 0.05 deliberately. Stage 1 guarantees it is never null, so
+#: whatever weight it carries is an identical constant added to every record -
+#: pure range compression with zero discriminating power. At 18.11% under v1 it
+#: was the single largest term in the whole score.
+FIELD_CRITICALITY: Final[Mapping[str, float]] = {
+    "work_id": 0.05,
+    "work_name": 0.05,
+    "district": 0.05,
+    "state": 0.05,
+    "sanction_amount": 0.20,
+    "amount_spent": 0.15,
+    "date_proposal": 0.20,
+    "date_approval": 0.20,
+    "date_completion": 0.15,
+    "implementing_agency": 0.05,
+    "vendor_name": 0.05,
+    "status": 0.05,
+}
+
+#: Decay rate for the critical-field cluster penalty.
+#:
+#: Evidence loss is super-additive: losing one date is a gap, but losing all
+#: three dates and both amounts destroys the record's ability to be
+#: cross-checked at all, which a linear weighted average cannot express.
+#: With delta = 0.35 the extra factor runs 1.00, 0.70, 0.50, 0.35, 0.25 as the
+#: critical deficit grows from 1 through 5.
+CLUSTER_PENALTY_DELTA: Final[float] = 0.35
+
+#: Critical-field deficit allowed before the cluster penalty engages. At 1.0 a
+#: single missing critical field costs only its weighted share, as before.
+CLUSTER_PENALTY_ALLOWANCE: Final[float] = 1.0
+
+
+# ===========================================================================
+# STAGE 2 FINAL CORRECTIONS (audit response)
+#
+# Three findings, all confined to C_recon:
+#   1. Lifecycle blindness - a proposed work legitimately has spent ~ 0 and was
+#      charged the underspend penalty for being normal.
+#   2. No overspend tolerance - penalty began at the first rupee past sanction,
+#      charging rounding and routine price variation as anomaly.
+#   3. Weak refusal for garbage - a non-finite amount scored 0.25, moderate
+#      enough to survive aggregation.
+# ===========================================================================
+
+#: Column carrying the lifecycle stage of a work.
+STATUS_FIELD: Final[str] = "status"
+
+#: Statuses at which spending is not expected to have completed. Underspend
+#: carries no information about data reliability for these records: a proposed
+#: work with zero expenditure is behaving exactly as it should.
+#:
+#: "pending" is included for forward-compatibility with real MPLADS exports.
+#: It is not in Stage 1's ALLOWED_STATUS, so Stage 1 will flag it
+#: VALUE_UNKNOWN_STATUS - but Stage 2 will still route it correctly rather than
+#: penalising a work for a vocabulary mismatch.
+RECON_PRE_COMPLETION_STATUSES: Final[tuple[str, ...]] = (
+    "proposed",
+    "approved",
+    "pending",
+    "ongoing",
+    "in progress",
+)
+
+#: Statuses at which the money should have been spent, so a low execution rate
+#: genuinely contradicts the claim of completion.
+RECON_TERMINAL_STATUSES: Final[tuple[str, ...]] = ("completed", "closed")
+
+#: Multiplier applied to gamma when the lifecycle stage cannot be determined -
+#: status null, placeholder, unparseable, or outside both vocabularies.
+#:
+#: A mild penalty, not the full one: we do not know whether the underspend is
+#: legitimate, so we neither excuse it nor condemn it. At 0.5 a total
+#: underspend scores exp(-0.6) = 0.549 instead of exp(-1.2) = 0.301.
+RECON_UNKNOWN_STATUS_GAMMA_SCALE: Final[float] = 0.5
+
+#: Tolerance band above the sanctioned amount before overspend is penalised.
+#:
+#: Rounding, minor price variation and final-bill adjustments routinely put a
+#: work a percent or two over its sanction. Penalising from the first rupee
+#: treated ordinary accounting noise as a control failure.
+#: r <= 1.05 -> no penalty;  r > 1.05 -> exp(-lambda * (r - 1.05)).
+RECON_OVERSPEND_TOLERANCE: Final[float] = 0.05
+
+#: Score for an amount beyond IMPLAUSIBLE_AMOUNT_THRESHOLD (1e15).
+#:
+#: Stage 1 already classifies these as VALUE_IMPLAUSIBLE_MAGNITUDE errors. They
+#: are finite, so they survive the non-finite branch, but a 1e300 sanction is
+#: not a number this system should reason about - it is a data-entry accident.
+#: Refused on the same terms as an infinity.
+RECON_IMPLAUSIBLE_MAGNITUDE_CREDIT: Final[float] = 0.0
