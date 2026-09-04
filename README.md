@@ -152,6 +152,7 @@ $$
 If risk score alone predicts administrative capacity above chance by more than $\epsilon$, the model is an artifact detector and ships disabled. **TODO: measure** — this test is specified and not yet run.
 
 ## Implementation
+<img width="1226" height="1283" alt="image" src="https://github.com/user-attachments/assets/dc5d01bf-ddd4-42e5-82a8-ef7262e3777a" />
 
 ### Core (`parakh-core`, Rust)
 
