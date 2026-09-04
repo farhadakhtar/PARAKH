@@ -1,0 +1,17 @@
+# PARAKH - runtime and test dependencies
+# Python 3.10+ required (PEP 604 unions, dataclass slots).
+
+# Core data handling.
+# pandas>=2.0 is required: cleaning uses to_datetime(format="ISO8601"), which
+# does not exist in 1.x.
+pandas>=2.0,<3.0
+numpy>=1.24,<3.0
+
+# Parquet ingestion (Corpus.from_parquet).
+pyarrow>=12.0
+
+# Typed, validated report models (ValidationReport).
+pydantic>=2.0,<3.0
+
+# Test suite.
+pytest>=7.4

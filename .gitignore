@@ -1,0 +1,15 @@
+# Generated Stage 1 artefacts. All of them are reproducible from
+# `python main.py --seed 42`, so tracking them only creates noise in diffs.
+data/*.csv
+data/*.parquet
+data/ground_truth_ledger.json
+outputs/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
