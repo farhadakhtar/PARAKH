@@ -1842,3 +1842,73 @@ ESCALATION_POLICY_VIOLATION_HINT: Final[str] = (
     "Realign them, or decide deliberately which invariant to break: 'never "
     "downgrade an escalation' or 'never escalate insufficient data'."
 )
+
+
+# ===========================================================================
+# Hardening pass - FIX 5, 6, 7
+# ===========================================================================
+
+#: FIX 6. One value, because the system has exactly one calibration state and
+#: no path to another without real labelled outcomes. When Stage 8 acquires
+#: them this becomes a vocabulary; until then a second value would be a lie.
+RISK_CALIBRATION_STATUSES: Final[tuple[str, ...]] = ("UNCALIBRATED",)
+
+RISK_CALIBRATION_STATUS: Final[str] = "UNCALIBRATED"
+
+#: FIX 6. Shorter and blunter than CALIBRATION_WARNING, which explains; this
+#: one is meant to be read at a glance on a queue row.
+RISK_RELATIVE_WARNING: Final[str] = (
+    "Risk scores are relative rankings, NOT probabilities."
+)
+
+#: FIX 7. The closed vocabulary an anomaly type may come from. Stage 4 owns
+#: ANOMALY_TYPES; Stage 6 may add exactly one correction label. Anything else
+#: means a stage started emitting a category nothing downstream understands -
+#: Stage 5 would silently score it zero breadth and Stage 7 would have no
+#: phrase for it.
+CLOSED_ANOMALY_VOCABULARY: Final[tuple[str, ...]] = tuple(
+    sorted(set(ANOMALY_TYPES) | {M1_CORRECTION_LABEL})
+)
+
+# ===========================================================================
+# Stage 8 - Calibration Layer (SCAFFOLD ONLY)
+#
+# Designed, not implemented. The one rule that matters is at the bottom: with
+# no real labelled outcomes there is no calibration, and the honest answer is
+# None rather than a number derived from synthetic data the system generated
+# for itself.
+# ===========================================================================
+
+STAGE8_VERSION: Final[str] = "stage8.calibration.v0-scaffold"
+
+#: Methods the design supports. All three map a monotone score to a
+#: probability; none of them invents information the labels do not contain.
+CALIBRATION_METHODS: Final[tuple[str, ...]] = (
+    "platt_scaling",
+    "isotonic_regression",
+    "histogram_binning",
+)
+
+#: What a run can say about its own calibration.
+CALIBRATION_STATUSES: Final[tuple[str, ...]] = (
+    "UNAVAILABLE",
+    "CALIBRATED",
+    "INSUFFICIENT_LABELS",
+    "REFUSED_SYNTHETIC",
+)
+
+#: Minimum real labelled outcomes before any method may be fitted. Below this
+#: a calibration curve is fitting noise, and a confidently wrong probability
+#: is worse than an admitted absence.
+CALIBRATION_MIN_LABELS: Final[int] = 200
+
+#: Minimum of the minority class. A calibration fitted on 199 negatives and
+#: one positive describes nothing.
+CALIBRATION_MIN_PER_CLASS: Final[int] = 30
+
+CALIBRATION_REFUSAL_NOTE: Final[str] = (
+    "No calibration was performed. This system has only ever run on synthetic "
+    "data it generated itself, so any 'calibration' fitted here would measure "
+    "the generator, not reality. calibrated_risk is None and the status says "
+    "why. Supply real labelled outcomes to change this."
+)

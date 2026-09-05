@@ -339,12 +339,43 @@ class TestPayloadIsSourceOfTruth:
         assert card["explanation"] == "line one\nline two\nwith, commas"
 
     def test_findings_survive_delimiter_injection(self) -> None:
-        """What the Stage 6 human sentence could not do, the payload does."""
+        """What the Stage 6 human sentence could not do, the payload does.
+
+        SUPERSEDED IN PART by FIX 7: the consumption pipeline now rejects any
+        anomaly category outside the closed vocabulary, so hostile strings can
+        no longer be fed through it AS findings. The payload encoding itself is
+        still injection-safe, which is what this test exists to prove, so it is
+        exercised at the encoder rather than through the pipeline.
+        """
+        from src.stage6.explanation import (
+            build_action_payload,
+            parse_action_payload,
+        )
+
         hostile = ["cost, outlier", "none recorded", "a with b", 'quote"here']
+        payload = build_action_payload(
+            {
+                "action_class": "ESCALATE_IMMEDIATE",
+                "priority_level": "P0",
+                "action_anomaly_types": hostile,
+                "action_rule": "investigate_high",
+                "severity_score": 0.5,
+                "severity_defined": True,
+                "risk_score": 0.6,
+                "risk_defined": True,
+                "decision_class": "INVESTIGATE",
+                "risk_flag": "high_risk",
+            }
+        )
+        assert parse_action_payload(payload)["findings"] == hostile
+
+    def test_a_category_outside_the_vocabulary_is_now_refused(self) -> None:
+        """FIX 7. Stage 5 would score an unknown category as zero breadth and
+        Stage 7 would have no phrase for it - both silently."""
         frame = make_frame()
-        frame["explanation_payload"] = payload_for(findings=hostile)
-        card = ConsumptionLayer().run(frame).cards[0]
-        assert card["findings"] == hostile
+        frame["explanation_payload"] = payload_for(findings=["brand_new_category"])
+        with pytest.raises(ValueError, match="closed vocabulary"):
+            ConsumptionLayer().run(frame)
 
     def test_card_carries_every_declared_field(self, spread: pd.DataFrame) -> None:
         result = ConsumptionLayer().run(spread)

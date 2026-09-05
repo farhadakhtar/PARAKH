@@ -26,6 +26,8 @@ from src.core.constants import (
     ACTION_TO_SEMANTIC_TYPE,
     CALIBRATION_WARNING,
     ESCALATION_REASON_STATUSES,
+    RISK_CALIBRATION_STATUS,
+    RISK_RELATIVE_WARNING,
     DECISION_CLARITY_FLAGS,
     PRIORITY_EXECUTION,
     PRIORITY_LEVELS,
@@ -56,6 +58,7 @@ from src.stage6.safety_layer import (
 from src.stage6.work_resolution import resolve_works, work_conflict_summary
 from src.stage7.annotations import (
     ANNOTATION_COLUMNS,
+    assert_closed_anomaly_vocabulary,
     build_annotations,
     build_system_metadata,
     build_transparency_metrics,
@@ -175,6 +178,8 @@ class ConsumptionResult:
             "calibration_warning": CALIBRATION_WARNING,
             "work_id_note": WORK_ID_AMBIGUITY_WARNING,
             "escalation_policy": self.escalation_policy,
+            "risk_calibration_status": RISK_CALIBRATION_STATUS,
+            "risk_relative_warning": RISK_RELATIVE_WARNING,
             "action_spec_note": ACTION_SPEC_LOSSY_NOTE,
             "risk_interpretation": interpretation_report(self.interpretation)
             if len(self.interpretation)
@@ -311,7 +316,9 @@ class ConsumptionLayer:
         # Transparency layer. Derived from the payloads only, and incapable of
         # changing an action, a priority or a queue - the guarantees below
         # verify exactly that.
-        annotations = build_annotations(payloads)
+        # FIX 7 - a category nothing downstream understands must not pass.
+        assert_closed_anomaly_vocabulary(payloads)
+        annotations = build_annotations(payloads, frame=frame)
         metadata = build_system_metadata(len(frame))
         metrics = build_transparency_metrics(annotations, payloads)
         work_summary = build_work_level_summary(frame, payloads, annotations)

@@ -35,8 +35,11 @@ from src.core.constants import (
     ACTION_SPEC_LOSSY_NOTE,
     ACTION_TO_GROUP,
     ACTION_TO_SEMANTIC_TYPE,
+    CLOSED_ANOMALY_VOCABULARY,
     ESCALATION_REASON_STATUSES,
     ESCALATION_UNEXPLAINED_WARNING,
+    RISK_CALIBRATION_STATUS,
+    RISK_RELATIVE_WARNING,
     ACTION_SPEC_LOSSY_WARNING,
     CALIBRATION_WARNING,
     CONFIDENCE_GATE_THRESHOLD,
@@ -79,8 +82,13 @@ ANNOTATION_COLUMNS: Tuple[str, ...] = (
     # for; the pairs are asserted equal on every run rather than assumed.
     "escalation_reason_status",   # R1, scoped to escalations
     "escalation_reason_warning",  # R1, names the Stage 4 root cause
+    "escalation_warning",         # R1, the specified field name
     "action_group",               # R3, lowercase partition
     "action_spec_lossy",          # R4, boolean rather than a message
+    "work_id_group_size",         # R5, how many records share this work_id
+    "work_id_conflict_flag",      # R5, do those records disagree
+    "risk_calibration_status",    # R6, always UNCALIBRATED
+    "risk_relative_warning",      # R6, the one-line version
 )
 
 #: Actions whose spec alias loses information. Computed from the alias table
@@ -100,7 +108,9 @@ def _is_unexplained(findings: Any) -> bool:
     return isinstance(findings, (list, tuple)) and M1_CORRECTION_LABEL in findings
 
 
-def build_annotations(payloads: pd.Series) -> pd.DataFrame:
+def build_annotations(
+    payloads: pd.Series, frame: Optional[pd.DataFrame] = None
+) -> pd.DataFrame:
     """Derive every annotation from the payloads alone.
 
     Reads only ``explanation_payload``, which Stage 6 emits as canonical JSON
@@ -111,6 +121,9 @@ def build_annotations(payloads: pd.Series) -> pd.DataFrame:
     Args:
         payloads: Decoded Stage 6 payloads, from
             :func:`~src.stage7.interface.decode_payloads`.
+        frame: The corpus frame, read only. Needed for the ``work_id``
+            columns; when omitted those read as a group of one, which is the
+            truthful answer for a frame that carries no work ids.
 
     Returns:
         A frame of :data:`ANNOTATION_COLUMNS`, aligned to ``payloads.index``.
@@ -118,7 +131,12 @@ def build_annotations(payloads: pd.Series) -> pd.DataFrame:
     index = payloads.index
     rows: List[Dict[str, Any]] = []
 
-    for payload in payloads:
+    # FIX 5 - group size and conflict, per record. Computed once here rather
+    # than per row: work_id is a business key that repeats, and a consumer
+    # joining on it needs to know that BEFORE they join, not after.
+    group_size, conflict = _work_id_context(payloads, frame)
+
+    for position, payload in enumerate(payloads):
         action = str(payload["action"])
         priority = str(payload["priority"])
         findings = list(payload.get("findings") or [])
@@ -177,9 +195,21 @@ def build_annotations(payloads: pd.Series) -> pd.DataFrame:
                 ),
                 # R3 - the same partition as priority_semantic_type, in the
                 # case the specification asked for.
+                "escalation_warning": (
+                    ESCALATION_UNEXPLAINED_WARNING
+                    if (is_escalation and unexplained)
+                    else None
+                ),
                 "action_group": ACTION_TO_GROUP[action],
                 # R4 - boolean, so a consumer can filter rather than parse.
                 "action_spec_lossy": action in _LOSSY_ACTIONS,
+                # FIX 5 - the ambiguity, stated per record.
+                "work_id_group_size": int(group_size[position]),
+                "work_id_conflict_flag": bool(conflict[position]),
+                # FIX 6 - on every record, not only in the report. A queue row
+                # read in isolation must still say what the number is not.
+                "risk_calibration_status": RISK_CALIBRATION_STATUS,
+                "risk_relative_warning": RISK_RELATIVE_WARNING,
                 "stage7_explanation": build_stage7_explanation(
                     action=action,
                     priority=priority,
@@ -199,6 +229,77 @@ def build_annotations(payloads: pd.Series) -> pd.DataFrame:
         frame["decision_clarity_flag"].value_counts().to_dict(),
     )
     return frame
+
+
+def _work_id_context(
+    payloads: pd.Series, frame: Optional[pd.DataFrame]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Group size and action-conflict per record, positionally aligned.
+
+    ``work_id`` repeats by design - Stage 1 injects duplicates - so 200 of
+    20,000 records share one and 56 of those groups are routed to different
+    actions. Neither fact is visible from a single row, which is exactly when
+    it does damage: a consumer joins on ``work_id``, fans out, and never
+    learns that the rows disagreed.
+
+    Records are **not** collapsed and no decision changes. This only says how
+    many rows share the key and whether they agree.
+
+    Args:
+        payloads: Decoded payloads, for the action of each record.
+        frame: Corpus frame carrying ``work_id``, or None.
+
+    Returns:
+        ``(group_size, conflict)`` as positional arrays.
+    """
+    count = len(payloads)
+    if frame is None or "work_id" not in frame.columns or count == 0:
+        # A frame with no work ids has one record per key by definition.
+        return np.ones(count, dtype="int64"), np.zeros(count, dtype=bool)
+
+    work_ids = frame["work_id"].astype("object").to_numpy()
+    actions = np.asarray([str(payload["action"]) for payload in payloads], dtype=object)
+
+    sizes: Dict[Any, int] = {}
+    seen: Dict[Any, set] = {}
+    for work_id, action in zip(work_ids, actions):
+        sizes[work_id] = sizes.get(work_id, 0) + 1
+        seen.setdefault(work_id, set()).add(action)
+
+    group_size = np.asarray([sizes[value] for value in work_ids], dtype="int64")
+    conflict = np.asarray([len(seen[value]) > 1 for value in work_ids], dtype=bool)
+    return group_size, conflict
+
+
+def assert_closed_anomaly_vocabulary(payloads: pd.Series) -> None:
+    """FIX 7 - refuse an anomaly category nothing downstream understands.
+
+    Stage 5 counts breadth over a fixed tuple and Stage 7 keeps a phrase per
+    type. A category outside the closed vocabulary would be scored as zero
+    breadth and described by nothing - silently, in both cases. That is the
+    failure mode this assertion exists to convert into a loud one.
+
+    Raises:
+        ValueError: Naming the unknown terms and the records carrying them.
+    """
+    permitted = set(CLOSED_ANOMALY_VOCABULARY)
+    offenders: Dict[str, List[Any]] = {}
+    for label, payload in payloads.items():
+        for name in payload.get("findings") or []:
+            if name not in permitted:
+                offenders.setdefault(str(name), []).append(label)
+    if offenders:
+        summary = {
+            name: {"count": len(labels), "sample": labels[:5]}
+            for name, labels in sorted(offenders.items())
+        }
+        raise ValueError(
+            f"anomaly categories outside the closed vocabulary: {summary}. "
+            f"Permitted: {sorted(permitted)}. A new category is scored as zero "
+            "breadth by Stage 5 and has no phrase in Stage 7, so it would be "
+            "silently under-weighted and undescribed. Add it to both, or do "
+            "not emit it."
+        )
 
 
 def build_stage7_explanation(
@@ -392,6 +493,11 @@ def build_transparency_metrics(
         },
         "n_action_spec_lossy": int(annotations["action_spec_lossy"].sum()),
         "_action_spec_note": ACTION_SPEC_LOSSY_NOTE,
+        # FIX 5 / FIX 6, as rates.
+        "n_in_duplicated_work": int((annotations["work_id_group_size"] > 1).sum()),
+        "n_work_id_conflict": int(annotations["work_id_conflict_flag"].sum()),
+        "risk_calibration_status": RISK_CALIBRATION_STATUS,
+        "_risk_note": RISK_RELATIVE_WARNING,
     }
 
 
