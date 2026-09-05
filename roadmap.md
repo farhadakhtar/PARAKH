@@ -2344,7 +2344,180 @@ the injectivity assertion (the spec revoked it) and two that expected
 
 ---
 
-## Stage 7
+## Stage 7 — Decision Consumption Layer
 
-Not started. Strict order is enforced: no stage begins until the previous one's
-tests pass.
+Turns Stage 6 decisions into human work, a machine contract, an audit trail and
+a feedback notebook. **Read-only over Stages 1–6**: it attaches nothing to the
+corpus and recomputes nothing — verified byte-identical, 0 columns added.
+
+`explanation_payload` is the source of truth; the human `explanation` is
+display only and is never parsed.
+
+| module | role |
+|---|---|
+| `interface.py` | queues, decision cards, priority/SLA semantics |
+| `api.py` | the machine contract (9 fields, canonical JSON) |
+| `audit.py` | immutable JSONL log, deterministic SHA-256 |
+| `feedback.py` | reviewer verdicts, stored and fed back into nothing |
+| `annotations.py` | the transparency layer — seven measured risks |
+| `pipeline.py` | `ConsumptionLayer`, 8 invariants |
+
+### Two conflicts in the brief, resolved rather than papered over
+
+**Timestamps vs determinism.** The brief requires ISO8601 timestamps in queues,
+API metadata, audit logs and feedback; the project forbids wall-clock values in
+anything serialised. Resolved by **injection**: every entry point takes an
+`issued_at` defaulting to a frozen constant, so a run is byte-reproducible and
+a production caller passes real time explicitly.
+
+**`record_id` vs `work_id`.** `work_id` is **not unique** — Stage 1 injects
+duplicates deliberately, and 200 records across 100 groups share one. It cannot
+key an audit log. Record identity is the corpus index; `work_id` is carried
+alongside as `business_id`.
+
+### The transparency layer — seven risks, made visible
+
+Each was measured by the read-only audit before being annotated:
+
+| risk | measured | now surfaced as |
+|---|---|---|
+| R1 escalations with no named reason | **18 of 419** (4.3%), 4 at P0 | `stage7_reason_flag` + detail |
+| R2 lossy `action_spec` | merges 291 P0 with 128 P1 | `action_truth_class` + warning on 419 |
+| R3 overloaded P1 | 3,402 data-quality vs 128 audit | `priority_semantic_type` (4 values) |
+| R4 hidden config dependency | gate coupling invisible | `system_metadata` with `gates_aligned` |
+| R5 duplicate `work_id` | 100 groups, **56 with conflicting actions** | `work_level_summary` |
+| R6 not decision-ready | "no issue" vs "cannot assess" | `decision_clarity_flag` |
+| R7 uncalibrated risk | max observed 0.73, not a probability | `calibration_warning` on all 20,000 |
+
+**Risk is aggregated by maximum, never by mean.** Averaging two records of a
+duplicated work would invent a number describing neither, and would let a
+high-risk record be diluted by a clean twin. The full distribution is carried
+beside the maximum.
+
+The lossy-alias warning is **derived from the alias table**, not hard-coded, so
+it stops warning by itself if the mapping ever becomes one-to-one rather than
+lying about a loss that no longer exists.
+
+### Zero mutation, proven
+
+| | before | after |
+|---|---|---|
+| all five action counts | 13,541 / 3,402 / 2,638 / 291 / 128 | **identical** |
+| P0 / P1 / P2 / P3 | 291 / 3,530 / 2,638 / 13,541 | **identical** |
+| risk p50 / p99 / max | 0.113716 / 0.605283 / 0.730351 | **identical** |
+| corpus columns added | — | **0** |
+
+Invariant **I7** asserts on every run that `action_truth_class` is an exact copy,
+that each semantic type agrees with its action, and that `AMBIGUOUS` and
+`DATA_LIMITED` are mutually exclusive. A corrupted annotation raises
+`Stage7InvariantError`.
+
+### Performance
+
+20,000 records in **0.70s** (requirement <1s), linear at ~30k rec/s. The first
+implementation ran 0.96s; profiling found 80,000 `frame.at[]` lookups costing
+0.616s and a 200,000-call invariant loop. Both were replaced with column
+extractions and vectorised comparisons — output-identical.
+
+1,335 tests pass (1,185 + 75 Stage 7 + 75 hardening).
+
+### Known limitations
+
+1. **Nothing is calibrated**, and now every record says so.
+2. **R1 is surfaced, not fixed.** The real fix is Stage 4 naming a
+   lifecycle-gated underspend; Stage 7 can only report that it declined to.
+3. **The configured gate-drift vector remains open.** `system_metadata` reports
+   `gates_aligned` but does not enforce it — enforcement is Stage 6's, and
+   closing it requires a routing-policy decision.
+4. **`DATA_QUALITY_REVIEW → ROUTE_AUDIT`** remains an imprecise spec alias.
+5. Stage 3 audit findings **N1–N4 remain open**; duplicate recall is still ~1%.
+
+---
+
+## Stage 8+
+
+Not started. Feedback is captured and deliberately unused: learning from the
+system's own outputs would make every later calibration circular.
+
+
+---
+
+## Stage 6.5 / 7.5 — Decision Safety Layer
+
+The first layer that deliberately **changes** a decision. **127 of 20,000
+records (0.635%)** are altered; 19,873 are untouched, and the corpus itself is
+never mutated.
+
+### Before vs after
+
+| decision | before | after | Δ |
+|---|---|---|---|
+| ESCALATE_IMMEDIATE | 291 | 287 | −4 |
+| ESCALATE_REVIEW | 128 | 114 | −14 |
+| **ESCALATE_REVIEW_REQUIRED** | 0 | **18** | +18 |
+| **INCONSISTENT_WORK** | 0 | **109** | +109 |
+| DATA_QUALITY_REVIEW | 3,402 | 3,369 | −33 |
+| REQUEST_CORRECTION | 2,638 | 2,614 | −24 |
+| PASSIVE_MONITOR | 13,541 | 13,489 | −52 |
+
+Rules fired: **S1 18, S2 0, S3 112, S4 0**.
+
+**Escalations before: 419. After: 419.** None was deleted — 18 were downgraded
+to `ESCALATE_REVIEW_REQUIRED`, which still reaches a human.
+
+### Two rules the specification did not settle
+
+**S2** reads either as its literal condition (`decision in {P0,P1}` → **3,402**
+records move from the data-quality team to the field officer) or as its own
+title, *"Data-limited escalation block"* (**0** records — escalations are never
+data-limited). The title wins by default: telling 3,402 filers they are at
+fault is a claim the data does not support, since most are unassessable because
+their peer group is too small. `S2_APPLIES_TO` flips it.
+
+**S3, as literally written, deletes 3 escalations — 2 of them P0.** Measured
+counter-example: `work_id mpl-mh-2018-010714` holds record 1511
+(ESCALATE_IMMEDIATE, risk 0.676, CLEAR) and record 10713 (PASSIVE_MONITOR, risk
+0.059, CLEAR). Stage 1 *injects* duplicate ids, so these are two unrelated works
+sharing an identifier — not one work assessed twice. The literal rule would
+destroy a clean, high-risk, unambiguous P0 lead because of a record that has
+nothing to do with it.
+
+`S3_PRESERVE_ESCALATIONS = True` keeps the escalation while still flagging S3 on
+every record in the group. Setting it False restores the literal rule and the
+counterfactual is tested: records 1511, 12787, 16277 are deleted.
+
+### R7 — risk is now readable without being calibrated
+
+Percentiles over **scored records only** — ranking an unscored record against
+measured ones would invent the comparison this system refuses. Bands:
+TOP_1_PERCENT 140 · TOP_5_PERCENT 559 · HIGH 2,792 · MEDIUM 6,980 · LOW 3,489 ·
+**6,040 unbanded** (unscored → `None`, never `LOW`).
+
+> risk 0.499 (Top 2.1% of scored records, band TOP_5_PERCENT, uncalibrated scale)
+
+### Stage 3 artefact reproducibility — fixed
+
+Every pipeline run, **the test suite included**, was overwriting the committed
+`artifacts/` bundle — silently destroying the reuse contract those artefacts
+exist to define. Runs now write to `runtime_artifacts/` (gitignored);
+`ArtifactWriteError` refuses a write into the committed bundle unless
+`allow_committed_write=True`. Confirmed: `artifacts/` no longer appears as
+modified after a full pipeline run.
+
+### Files
+
+`src/stage6/safety_layer.py` · `src/stage6/work_resolution.py` ·
+`src/stage5/risk_interpretation.py` · `tests/test_safety_layer.py` (61 tests)
+
+**1,396 tests pass.** All 191 Stage 3 and 150 Stage 7 tests pass unchanged.
+
+### Known limitations
+
+1. **S3 fires on 112 records but resolves nothing.** It reports a contradiction
+   caused by duplicate identifiers; only fixing `work_id` uniqueness upstream
+   would resolve it.
+2. **S2 and S4 are inert** (0 records each) — guards, not transforms.
+3. **Percentiles are corpus-relative.** A record's band changes if the corpus
+   changes. That is a property of ranking, not a defect, but it means bands are
+   not comparable across runs.
+4. **Nothing is calibrated**; every output still says so.

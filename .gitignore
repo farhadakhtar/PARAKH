@@ -13,3 +13,7 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+
+# Stage 3 artefacts written by a run. The committed bundle lives in
+# artifacts/ and is the frozen reference; these are regenerated output.
+runtime_artifacts/

@@ -1459,3 +1459,316 @@ SPEC_COLUMN_ALIAS: Final[dict[str, str]] = {
     "priority": "priority_level",
     "action_reason": "action_rule",
 }
+
+
+# ===========================================================================
+# Stage 7 - Decision Consumption Layer
+#
+# Stage 7 decides nothing. It makes the Stage 6 decision visible, actionable
+# and accountable: a queue a person works, a JSON contract a machine consumes,
+# an immutable log, and a place to record what a reviewer actually found.
+#
+# Every table here is an OPERATIONAL policy - who works what, and how fast -
+# not an analytical one. Changing an SLA changes no score.
+# ===========================================================================
+
+STAGE7_VERSION: Final[str] = "stage7.consumption.v1"
+
+#: The API response schema version. Independent of STAGE7_VERSION so the
+#: contract can stay v1 across internal changes; a consumer pins this.
+STAGE7_API_VERSION: Final[str] = "v1"
+
+#: Action -> the queue that works it. One queue per action, total by
+#: construction: INVARIANT 1 is checked against this table, not assumed.
+ACTION_TO_QUEUE_NAME: Final[dict[str, str]] = {
+    "ESCALATE_IMMEDIATE": "investigator_queue",
+    "ESCALATE_REVIEW": "review_queue",
+    "DATA_QUALITY_REVIEW": "audit_queue",
+    "REQUEST_CORRECTION": "correction_queue",
+    "PASSIVE_MONITOR": "monitoring_queue",
+}
+
+QUEUE_NAMES: Final[tuple[str, ...]] = (
+    "investigator_queue",
+    "review_queue",
+    "audit_queue",
+    "correction_queue",
+    "monitoring_queue",
+)
+
+#: Execution semantics per priority. Defined here, enforced nowhere in the
+#: scoring: Stage 7 states what a priority MEANS operationally and does not
+#: touch how it was assigned.
+#:
+#: ``sla_hours`` is None for P3 because passive monitoring has no deadline -
+#: nobody is waiting on it, and inventing an SLA would create false urgency.
+PRIORITY_EXECUTION: Final[dict[str, dict[str, object]]] = {
+    "P0": {
+        "mode": "immediate_assignment",
+        "sla_hours": 24,
+        "description": "Assign to a named investigator on receipt.",
+    },
+    "P1": {
+        "mode": "scheduled_review",
+        "sla_hours": 72,
+        "description": "Enters the next scheduled review cycle, 2-3 days.",
+    },
+    "P2": {
+        "mode": "batch_processing",
+        "sla_hours": 168,
+        "description": "Batched for the correction run; no individual dispatch.",
+    },
+    "P3": {
+        "mode": "passive_logging",
+        "sla_hours": None,
+        "description": "Logged and watched. No one is assigned and no clock runs.",
+    },
+}
+
+#: Read back to a human beside the risk number. Keyed on Stage 5's own reason
+#: so the wording can never contradict why the score is or is not there.
+CONFIDENCE_CONTEXT: Final[dict[str, str]] = {
+    "ok": "Risk was measurable: the record cleared the confidence gate and its peer group carried a norm.",
+    "severity_undefined": "No risk score exists: nothing about this record could be compared to its peers. It is unassessed, not cleared.",
+    "confidence_below_gate": "No risk score exists: the record's own evidence falls below the confidence gate. Repair the record before judging the work.",
+    "no_cluster_norm": "No risk score exists: this work type carries no peer norm to compare against.",
+}
+
+#: Frozen clock. Stage 7's outputs carry timestamps, and the project forbids
+#: wall-clock values in anything serialised - the two requirements collide.
+#: Resolved by injection: every entry point takes an ``issued_at``, defaulting
+#: to this constant, so a test or a report is byte-reproducible and a
+#: production caller passes the real time explicitly.
+STAGE7_REFERENCE_TIMESTAMP: Final[str] = "2024-01-01T00:00:00+00:00"
+
+#: Feedback verdicts a reviewer may record. Deliberately small.
+FEEDBACK_OUTCOMES: Final[tuple[str, ...]] = (
+    "confirmed",
+    "rejected",
+    "inconclusive",
+)
+
+STAGE7_QUEUE_REPORT: Final[str] = "stage7_queues.json"
+STAGE7_AUDIT_LOG: Final[str] = "stage7_audit_log.jsonl"
+STAGE7_FEEDBACK_LOG: Final[str] = "stage7_feedback.jsonl"
+
+
+# ===========================================================================
+# Stage 7 annotation layer - transparency, not correction
+#
+# Every constant below annotates a decision that has already been made. None
+# of them can change one. They exist because the read-only audit measured
+# seven ways this system can be misread, and a limitation that is not written
+# down is a limitation that will be discovered by whoever trusts it first.
+# ===========================================================================
+
+#: Whether an escalation carries a named upstream finding.
+REASON_FLAGS: Final[tuple[str, ...]] = ("EXPLAINED", "UNEXPLAINED_DEVIATION")
+
+#: R1. Measured: 18 of 419 escalations (4.3%), 4 of them at P0, with |z| from
+#: 4.3 to 25.8 and lifecycle pre_completion (13) or unknown (5). Stage 4 gates
+#: underspend_anomaly on lifecycle while its routing and Stage 5's severity
+#: both still read |z|, so a large underspend on an unfinished work escalates
+#: unlabelled. The deviation is real and was measured; only the category is
+#: missing.
+UNEXPLAINED_REASON_DETAIL: Final[str] = (
+    "This record was escalated due to statistical deviation, but no specific "
+    "anomaly category was assigned upstream. The deviation was measured and is "
+    "real; what is missing is a name for it. Treat this as a lead requiring "
+    "manual characterisation, not as a categorised finding."
+)
+
+EXPLAINED_REASON_DETAIL: Final[str] = (
+    "This record carries at least one named anomaly category from upstream."
+)
+
+#: R2. Measured collapse: INVESTIGATE <- {ESCALATE_IMMEDIATE, ESCALATE_REVIEW},
+#: merging 291 P0 fraud referrals with 128 P1 audit reviews.
+ACTION_SPEC_LOSSY_WARNING: Final[str] = (
+    "This field is a lossy alias: ESCALATE_IMMEDIATE and ESCALATE_REVIEW both "
+    "map to INVESTIGATE, so it cannot distinguish an urgent fraud referral "
+    "from a scheduled audit review. Use action_truth_class for exact intent."
+)
+
+#: R3. Splits the overloaded P1 band, which mixes 3,402 data-quality records
+#: with 128 audit escalations under one priority.
+PRIORITY_SEMANTIC_TYPES: Final[tuple[str, ...]] = (
+    "ESCALATION",
+    "DATA_QUALITY",
+    "CORRECTION",
+    "MONITORING",
+)
+
+ACTION_TO_SEMANTIC_TYPE: Final[dict[str, str]] = {
+    "ESCALATE_IMMEDIATE": "ESCALATION",
+    "ESCALATE_REVIEW": "ESCALATION",
+    "DATA_QUALITY_REVIEW": "DATA_QUALITY",
+    "REQUEST_CORRECTION": "CORRECTION",
+    "PASSIVE_MONITOR": "MONITORING",
+}
+
+#: R6. Whether a reviewer can act on this record as presented.
+DECISION_CLARITY_FLAGS: Final[tuple[str, ...]] = (
+    "CLEAR",
+    "AMBIGUOUS",
+    "DATA_LIMITED",
+)
+
+#: R7. Attached to every output. The distinction it draws is the one most
+#: likely to be lost: a risk of 0.5 is a position on an uncalibrated ordinal
+#: scale, not a probability of anything.
+CALIBRATION_WARNING: Final[str] = (
+    "Risk scores are NOT calibrated probabilities. Thresholds are heuristic "
+    "and not validated on real-world data. A risk of 0.5 does not mean a 50% "
+    "chance of anything; the observed maximum on the reference corpus is 0.73."
+)
+
+#: R4. Config drift is invisible in the outputs themselves, and the system's
+#: "insufficient data is never escalated" guarantee depends on two thresholds
+#: happening to be equal.
+CONFIG_DEPENDENCY_WARNING: Final[str] = (
+    "System outputs depend on configuration. Comparisons across runs require "
+    "identical configuration. In particular the Stage 4 escalation gate and "
+    "the Stage 5 scoring gate must remain equal: if they diverge, records can "
+    "be escalated with no risk score."
+)
+
+#: R5. Measured: 200 records share a work_id across 100 groups, and 56 of
+#: those groups receive DIFFERENT actions. Record identity is the corpus
+#: index; work_id is a business key that repeats.
+WORK_ID_AMBIGUITY_WARNING: Final[str] = (
+    "work_id is not unique: it repeats across records, and records sharing "
+    "one can receive different actions. Record identity is the corpus index. "
+    "Aggregating by work_id shows the worst case per work, never an average."
+)
+
+STAGE7_ANNOTATION_REPORT: Final[str] = "stage7_annotations.json"
+STAGE7_WORK_SUMMARY: Final[str] = "stage7_work_summary.json"
+
+
+# ===========================================================================
+# Stage 6.5 - Decision Safety Layer
+#
+# The first layer in this system that deliberately CHANGES a decision. Every
+# rule below was measured on the 20,000-record corpus before being written,
+# and each carries the count it moves. A safety rule whose blast radius nobody
+# measured is not a safety rule.
+# ===========================================================================
+
+STAGE65_VERSION: Final[str] = "stage6.safety.v1"
+
+#: Decisions the safety layer may substitute. Distinct from ACTION_CLASSES so
+#: a consumer can always tell an original routing decision from a safety
+#: intervention.
+SAFETY_DECISIONS: Final[tuple[str, ...]] = (
+    "ESCALATE_REVIEW_REQUIRED",
+    "REMEDIATE",
+    "INCONSISTENT_WORK",
+    "MONITOR",
+)
+
+SAFETY_RULES: Final[tuple[str, ...]] = ("S1", "S2", "S3", "S4")
+
+#: S1. Measured: 18 escalations (4 P0, 14 P1) carry no named anomaly.
+S1_REASON: Final[str] = (
+    "Escalation blocked: no named anomaly category. The deviation is real and "
+    "was measured, but nothing upstream characterised it, so it cannot be "
+    "handed to an investigator as a finding."
+)
+
+#: S2. The specification says "decision in {P0, P1}" while its title says
+#: "Data-limited escalation block". The two readings differ by 3,402 records:
+#:
+#: * ``escalations`` - only escalating actions. Fires on **0** records,
+#:   because Stage 5 never scores a record it cannot measure and Stage 6 never
+#:   escalates an unscored one. The rule is a guard, not a transform.
+#: * ``all_p0_p1`` - every P0/P1 record. Fires on **3,402**, moving every
+#:   DATA_QUALITY_REVIEW from the data-quality team to the field officer.
+#:
+#: Default is the title reading. Sending 3,402 unassessable records to the
+#: officer who filed them asserts the filer is at fault, which the data does
+#: not support - many are unassessable because their peer group is too small.
+S2_APPLIES_TO: Final[str] = "escalations"
+
+S2_REASON: Final[str] = (
+    "Escalation blocked: the record could not be assessed. An unmeasurable "
+    "record cannot support a finding; repair the evidence first."
+)
+
+#: S3. Measured: 56 work_id groups hold records routed to different actions,
+#: covering 112 records.
+#:
+#: **The override would delete 3 escalations, 2 of them P0.** Worked example
+#: from the corpus: work_id mpl-mh-2018-010714 holds one ESCALATE_IMMEDIATE
+#: (risk 0.676, clarity CLEAR) and one PASSIVE_MONITOR (risk 0.059, CLEAR).
+#: These are two unrelated works that share an id because Stage 1 injects
+#: duplicate ids as a data defect - not one work assessed twice. Replacing
+#: both with INCONSISTENT_WORK destroys a clean, unambiguous P0 lead because
+#: an unrelated record happened to share its identifier.
+#:
+#: With this True, an escalating record keeps its escalation and is flagged;
+#: the conflict is still surfaced on every record in the group and in the work
+#: summary. Set False for the literal specification.
+S3_PRESERVE_ESCALATIONS: Final[bool] = True
+
+S3_REASON: Final[str] = (
+    "Work-level contradiction: records sharing this work_id were routed to "
+    "different actions. work_id is not unique in this data, so they may be "
+    "different works rather than one work assessed twice."
+)
+
+S3_ESCALATION_PRESERVED_REASON: Final[str] = (
+    "Work-level contradiction surfaced, but this record's escalation is "
+    "retained: suppressing it would delete a lead because an unrelated record "
+    "shares its work_id. Review the conflict, not instead of the escalation."
+)
+
+#: S4. Inert while the gates are aligned. Fires on 291 high_risk records if
+#: they ever diverge.
+S4_REASON: Final[str] = (
+    "Confidence gates are misaligned, so an escalated record may carry no risk "
+    "score. High-risk decisions are downgraded to MONITOR until the Stage 4 "
+    "and Stage 5 gates agree."
+)
+
+STAGE65_SAFETY_LOG: Final[str] = "stage65_safety_log.jsonl"
+
+# ===========================================================================
+# Risk interpretation - relative, never probabilistic
+# ===========================================================================
+
+#: Bands over the PERCENTILE of a record's risk among scored records, not over
+#: the raw score. The raw scale is uncalibrated and its maximum is 0.73, so a
+#: fixed cut on it means nothing; a rank is at least a statement about this
+#: corpus.
+RISK_BANDS: Final[tuple[str, ...]] = (
+    "TOP_1_PERCENT",
+    "TOP_5_PERCENT",
+    "HIGH",
+    "MEDIUM",
+    "LOW",
+)
+
+#: Percentile floors, descending. A record at or above a floor takes that band.
+RISK_BAND_FLOORS: Final[tuple[tuple[str, float], ...]] = (
+    ("TOP_1_PERCENT", 99.0),
+    ("TOP_5_PERCENT", 95.0),
+    ("HIGH", 75.0),
+    ("MEDIUM", 25.0),
+    ("LOW", 0.0),
+)
+
+#: Percentiles are computed over SCORED records only. Including the 30.2% with
+#: no risk would rank an unmeasurable record against measured ones, which is
+#: exactly the false certainty this system exists to refuse.
+RISK_PERCENTILE_POPULATION: Final[str] = "scored_records_only"
+
+# ===========================================================================
+# Stage 3 artefact reproducibility
+# ===========================================================================
+
+#: Where a run WRITES its artefacts. Separate from ARTIFACT_DIR, which holds
+#: the committed reference bundle: before this split, every pipeline run - the
+#: test suite included - overwrote tracked files, which silently destroyed the
+#: reuse contract those artefacts exist to provide.
+RUNTIME_ARTIFACT_DIR: Final[Path] = PROJECT_ROOT / "runtime_artifacts"

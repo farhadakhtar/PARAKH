@@ -23,6 +23,7 @@ import pandas as pd
 
 from src.core.constants import (
     ARTIFACT_DIR,
+    RUNTIME_ARTIFACT_DIR,
     CLUSTER_MIN_RECORDS,
     COST_STRATA_BINS,
     DUPLICATE_SIMILARITY_THRESHOLD,
@@ -144,7 +145,10 @@ class SemanticConfig:
     #: Reproducibility contract. Default is compute-and-save; reuse is
     #: opt-in, because silently scoring a new corpus against a stale
     #: vocabulary is worse than recomputing one.
-    artifact_dir: Path = ARTIFACT_DIR
+    #: Where THIS run writes. The committed bundle at ARTIFACT_DIR is the
+    #: frozen reference for reuse and is never written by default; see
+    #: ArtifactWriteError for why.
+    artifact_dir: Path = RUNTIME_ARTIFACT_DIR
     reuse_artifacts: bool = STAGE3_REUSE_ARTIFACTS_DEFAULT
     save_artifacts: bool = STAGE3_SAVE_ARTIFACTS_DEFAULT
 

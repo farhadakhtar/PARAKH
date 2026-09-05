@@ -37,6 +37,7 @@ import pandas as pd
 
 from src.core.constants import (
     ARTIFACT_DIR,
+    RUNTIME_ARTIFACT_DIR,
     COST_STRATA_FILE,
     MAX_STRATA_DRIFT,
     MAX_UNSEEN_TOKEN_RATE,
@@ -190,10 +191,52 @@ class ArtifactBundle:
         return self.vocabulary is not None and self.strata is not None
 
 
+class ArtifactWriteError(RuntimeError):
+    """Raised when a run tries to write into the committed artefact bundle.
+
+    ``artifacts/`` holds the reference vocabulary and cost strata that the
+    reuse contract is defined against. Before this guard, every pipeline run -
+    the test suite included - overwrote them, so the "reuse a frozen bundle"
+    guarantee was being silently destroyed by the act of running the pipeline.
+    Runs now write to ``runtime_artifacts/``; overwriting the committed bundle
+    requires saying so.
+    """
+
+
+def _guard_destination(directory: Path, allow_committed_write: bool) -> None:
+    """Refuse a write into the committed bundle unless explicitly permitted.
+
+    Args:
+        directory: Where the caller wants to write.
+        allow_committed_write: Whether overwriting the reference bundle is
+            intended. Deliberately not a default anywhere.
+
+    Raises:
+        ArtifactWriteError: On an unpermitted write to the committed bundle.
+    """
+    if allow_committed_write:
+        return
+    try:
+        target = Path(directory).resolve()
+        committed = Path(ARTIFACT_DIR).resolve()
+    except OSError:  # pragma: no cover - unresolvable path
+        return
+    if target == committed:
+        raise ArtifactWriteError(
+            f"refusing to write into the committed artefact bundle at "
+            f"{committed}. That directory is the frozen reference the reuse "
+            f"contract is defined against; a run that overwrites it destroys "
+            f"the comparison it exists for. Write to {RUNTIME_ARTIFACT_DIR} "
+            f"instead, or pass allow_committed_write=True to refresh the "
+            f"reference deliberately."
+        )
+
+
 def save_artifacts(
     vocabulary: VocabularyArtifact,
     strata: StrataArtifact,
-    artifact_dir: Path = ARTIFACT_DIR,
+    artifact_dir: Path = RUNTIME_ARTIFACT_DIR,
+    allow_committed_write: bool = False,
 ) -> Dict[str, Path]:
     """Write both artefacts as JSON.
 
@@ -205,6 +248,7 @@ def save_artifacts(
     Returns:
         Mapping of artefact name to the path written.
     """
+    _guard_destination(artifact_dir, allow_committed_write)
     directory = ensure_dir(Path(artifact_dir))
     written = {
         "tfidf_vocab": write_json(vocabulary.to_dict(), directory / TFIDF_VOCAB_FILE),
