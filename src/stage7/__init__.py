@@ -49,6 +49,11 @@ from src.stage7.interface import (
     decode_payloads,
     require_contract,
 )
+from src.stage7.policy import (
+    Stage7PolicyError,
+    escalation_policy_report,
+    validate_escalation_policy,
+)
 from src.stage7.pipeline import (
     ConsumptionLayer,
     ConsumptionResult,
@@ -69,6 +74,7 @@ __all__ = [
     "QueueItem",
     "Stage7ContractError",
     "Stage7InvariantError",
+    "Stage7PolicyError",
     "append_feedback",
     "build_annotations",
     "build_api_response",
@@ -84,6 +90,8 @@ __all__ = [
     "build_queues",
     "compute_input_hash",
     "consume",
+    "escalation_policy_report",
+    "validate_escalation_policy",
     "decode_payloads",
     "read_audit_log",
     "read_feedback_log",

@@ -1772,3 +1772,73 @@ RISK_PERCENTILE_POPULATION: Final[str] = "scored_records_only"
 #: test suite included - overwrote tracked files, which silently destroyed the
 #: reuse contract those artefacts exist to provide.
 RUNTIME_ARTIFACT_DIR: Final[Path] = PROJECT_ROOT / "runtime_artifacts"
+
+
+# ===========================================================================
+# Surgical correction pass - R1..R4
+#
+# Each field below was named by the correction specification. Where an
+# equivalent already existed under a different name it is kept and the
+# specified field is added beside it: renaming a shipped column would break
+# consumers for no gain, and two names for one fact is cheaper than a
+# migration. Every pair is asserted equal on each run.
+# ===========================================================================
+
+#: R1. Whether an escalation carries a named upstream anomaly.
+ESCALATION_REASON_STATUSES: Final[tuple[str, ...]] = (
+    "explained",
+    "unexplained_upstream",
+)
+
+#: R1. Names the root cause without inventing one. Stage 4 gates
+#: `underspend_anomaly` on lifecycle, so a large underspend on a work that is
+#: not yet complete escalates on magnitude while carrying no category. The
+#: deviation is real and was measured; only the label is missing, and this
+#: text says exactly that and nothing more.
+ESCALATION_UNEXPLAINED_WARNING: Final[str] = (
+    "This escalation has no named anomaly. Root cause originates in Stage 4 "
+    "lifecycle gating: the deviation was measured and drove the escalation, "
+    "but Stage 4 declined to assign it a category. No cause has been inferred "
+    "here - a reviewer must characterise it manually."
+)
+
+#: R3. Splits the overloaded P1 band. Lowercase, per the specification;
+#: PRIORITY_SEMANTIC_TYPES carries the same partition in upper case and the
+#: two are asserted consistent.
+ACTION_GROUPS: Final[tuple[str, ...]] = (
+    "escalation",
+    "data_quality",
+    "correction",
+    "monitoring",
+)
+
+ACTION_TO_GROUP: Final[dict[str, str]] = {
+    "ESCALATE_IMMEDIATE": "escalation",
+    "ESCALATE_REVIEW": "escalation",
+    "DATA_QUALITY_REVIEW": "data_quality",
+    "REQUEST_CORRECTION": "correction",
+    "PASSIVE_MONITOR": "monitoring",
+}
+
+#: R4. Note attached to the report wherever action_spec appears.
+ACTION_SPEC_LOSSY_NOTE: Final[str] = (
+    "Spec vocabulary collapses urgency levels. Use action_class for exact "
+    "intent."
+)
+
+#: R2. The invariant this system's safety rests on, enforced rather than
+#: assumed. Stage 4 cannot escalate below its confidence gate and Stage 5
+#: cannot score below the same number, so INVESTIGATE implies risk_defined -
+#: but only while the two gates are equal. A configured divergence
+#: (RiskConfig(min_confidence=0.80)) breaks it without changing any constant,
+#: and was measured to produce 73 escalated records with no risk score.
+#:
+#: Stage 7 refuses to consume that state. It is the right layer for the
+#: refusal: Stage 6 must still be able to route contradictory input for its
+#: own policy tests, but nothing may be handed to a human from it.
+ESCALATION_POLICY_VIOLATION_HINT: Final[str] = (
+    "Stage 4 escalated records that Stage 5 declined to score. This happens "
+    "when the Stage 4 escalation gate and the Stage 5 scoring gate differ. "
+    "Realign them, or decide deliberately which invariant to break: 'never "
+    "downgrade an escalation' or 'never escalate insufficient data'."
+)

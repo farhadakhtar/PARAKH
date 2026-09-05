@@ -20,8 +20,12 @@ import pandas as pd
 from src.core.constants import (
     ACTION_CLASSES,
     ACTION_TO_QUEUE_NAME,
+    ACTION_GROUPS,
+    ACTION_SPEC_LOSSY_NOTE,
+    ACTION_TO_GROUP,
     ACTION_TO_SEMANTIC_TYPE,
     CALIBRATION_WARNING,
+    ESCALATION_REASON_STATUSES,
     DECISION_CLARITY_FLAGS,
     PRIORITY_EXECUTION,
     PRIORITY_LEVELS,
@@ -58,6 +62,11 @@ from src.stage7.annotations import (
     build_work_level_summary,
 )
 from src.stage7.api import API_FIELDS, build_api_responses
+from src.stage7.policy import (
+    Stage7PolicyError,
+    escalation_policy_report,
+    validate_escalation_policy,
+)
 from src.stage7.audit import AUDIT_FIELDS, build_audit_log, write_audit_log
 from src.stage7.interface import (
     QueueItem,
@@ -104,6 +113,8 @@ class ConsumptionResult:
     safety: Optional[SafetyResult] = None
     #: Work-level resolution, with conflicts surfaced (R5).
     work_resolution: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: The escalation invariant, stated even when it passes (R2).
+    escalation_policy: Dict[str, Any] = field(default_factory=dict)
     elapsed_seconds: float = 0.0
 
     def __len__(self) -> int:
@@ -163,6 +174,8 @@ class ConsumptionResult:
             "transparency_metrics": self.transparency_metrics,
             "calibration_warning": CALIBRATION_WARNING,
             "work_id_note": WORK_ID_AMBIGUITY_WARNING,
+            "escalation_policy": self.escalation_policy,
+            "action_spec_note": ACTION_SPEC_LOSSY_NOTE,
             "risk_interpretation": interpretation_report(self.interpretation)
             if len(self.interpretation)
             else {},
@@ -279,6 +292,10 @@ class ConsumptionLayer:
         """
         frame = self._frame_of(source)
         require_contract(frame)
+        # R2 - refuse the state before building anything from it. An
+        # escalation with no risk score must not reach a person, and a
+        # half-built result is harder to reason about than none.
+        validate_escalation_policy(frame)
         started = time.perf_counter()
 
         payloads = decode_payloads(frame)
@@ -298,6 +315,7 @@ class ConsumptionLayer:
         metadata = build_system_metadata(len(frame))
         metrics = build_transparency_metrics(annotations, payloads)
         work_summary = build_work_level_summary(frame, payloads, annotations)
+        policy = escalation_policy_report(frame)
 
         # R7 - a percentile is the strongest honest reading of an
         # uncalibrated scale. Adds columns; changes no score.
@@ -338,6 +356,7 @@ class ConsumptionLayer:
             interpretation=interpretation,
             safety=safety,
             work_resolution=resolution,
+            escalation_policy=policy,
             elapsed_seconds=time.perf_counter() - started,
         )
         self._assert_guarantees(result, frame, payloads)
@@ -513,6 +532,32 @@ class ConsumptionLayer:
             _require(
                 not any(a and u for a, u in zip(ambiguous, unscored)),
                 "I7: a record is both AMBIGUOUS and DATA_LIMITED",
+            )
+
+            # I8 - the correction-pass fields duplicate existing facts in a
+            # new shape. Two names for one fact is only safe while they agree.
+            _require(
+                list(annotations["action_group"])
+                == [ACTION_TO_GROUP[name] for name in actions],
+                "I8: action_group disagrees with its action",
+            )
+            _require(
+                [value.upper() for value in annotations["action_group"]]
+                == list(annotations["priority_semantic_type"]),
+                "I8: action_group and priority_semantic_type disagree",
+            )
+            _require(
+                set(annotations["escalation_reason_status"])
+                <= set(ESCALATION_REASON_STATUSES),
+                "I8: an undeclared escalation_reason_status was emitted",
+            )
+            _require(
+                list(annotations["action_spec_lossy"])
+                == [
+                    warning is not None
+                    for warning in annotations["action_interpretation_warning"]
+                ],
+                "I8: action_spec_lossy disagrees with the lossy warning",
             )
 
 

@@ -31,10 +31,16 @@ import pandas as pd
 
 from src.core.constants import (
     ACTION_CLASSES,
+    ACTION_GROUPS,
+    ACTION_SPEC_LOSSY_NOTE,
+    ACTION_TO_GROUP,
     ACTION_TO_SEMANTIC_TYPE,
+    ESCALATION_REASON_STATUSES,
+    ESCALATION_UNEXPLAINED_WARNING,
     ACTION_SPEC_LOSSY_WARNING,
     CALIBRATION_WARNING,
     CONFIDENCE_GATE_THRESHOLD,
+    ESCALATING_ACTIONS,
     CONFIG_DEPENDENCY_WARNING,
     DECISION_CLARITY_FLAGS,
     EXPLAINED_REASON_DETAIL,
@@ -67,6 +73,14 @@ ANNOTATION_COLUMNS: Tuple[str, ...] = (
     "decision_clarity_flag",
     "calibration_warning",
     "stage7_explanation",
+    # --- added by the surgical correction pass ---------------------------
+    # Named by the correction specification. Each duplicates a fact an
+    # existing column already carries, in the shape the specification asks
+    # for; the pairs are asserted equal on every run rather than assumed.
+    "escalation_reason_status",   # R1, scoped to escalations
+    "escalation_reason_warning",  # R1, names the Stage 4 root cause
+    "action_group",               # R3, lowercase partition
+    "action_spec_lossy",          # R4, boolean rather than a message
 )
 
 #: Actions whose spec alias loses information. Computed from the alias table
@@ -114,6 +128,7 @@ def build_annotations(payloads: pd.Series) -> pd.DataFrame:
 
         unexplained = _is_unexplained(findings)
         unscored = risk is None
+        is_escalation = action in ESCALATING_ACTIONS
 
         # R1 - is there a named basis for this record's treatment?
         reason_flag = "UNEXPLAINED_DEVIATION" if unexplained else "EXPLAINED"
@@ -147,6 +162,24 @@ def build_annotations(payloads: pd.Series) -> pd.DataFrame:
                 "decision_clarity_flag": clarity,
                 # R7 - attached to every record, not just the report.
                 "calibration_warning": CALIBRATION_WARNING,
+                # R1 - scoped to escalations. A monitored record with no
+                # findings is correct, not unexplained, so it reads
+                # "explained" rather than implying something is missing.
+                "escalation_reason_status": (
+                    "unexplained_upstream"
+                    if (is_escalation and unexplained)
+                    else "explained"
+                ),
+                "escalation_reason_warning": (
+                    ESCALATION_UNEXPLAINED_WARNING
+                    if (is_escalation and unexplained)
+                    else None
+                ),
+                # R3 - the same partition as priority_semantic_type, in the
+                # case the specification asked for.
+                "action_group": ACTION_TO_GROUP[action],
+                # R4 - boolean, so a consumer can filter rather than parse.
+                "action_spec_lossy": action in _LOSSY_ACTIONS,
                 "stage7_explanation": build_stage7_explanation(
                     action=action,
                     priority=priority,
@@ -349,6 +382,16 @@ def build_transparency_metrics(
         "n_lossy_action_alias": int(
             annotations["action_interpretation_warning"].notna().sum()
         ),
+        # R1/R3/R4 in the specified shapes.
+        "n_unexplained_upstream": int(
+            (annotations["escalation_reason_status"] == "unexplained_upstream").sum()
+        ),
+        "by_action_group": {
+            name: int((annotations["action_group"] == name).sum())
+            for name in ACTION_GROUPS
+        },
+        "n_action_spec_lossy": int(annotations["action_spec_lossy"].sum()),
+        "_action_spec_note": ACTION_SPEC_LOSSY_NOTE,
     }
 
 
