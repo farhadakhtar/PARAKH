@@ -150,23 +150,52 @@ export const MAP_SIZE = {
   height: (bounds.maxLat - bounds.minLat) * MAP_SCALE,
 }
 
-/** Approximate visual centroid (largest ring mean) of a feature. */
-export function featureCentroid(f: GeoFeature): { map: [number, number]; lonlat: [number, number] } {
-  let best: LngLatRing | null = null
-  for (const poly of featurePolygons(f)) {
-    if (!best || poly[0].length > best.length) best = poly[0]
+/** Mathematical centroid (area-weighted polygon centroid) of a GeoFeature. */
+export function getFeatureCentroidLonLat(f: GeoFeature): [number, number] {
+  const polys = featurePolygons(f)
+  if (!polys || !polys.length) return [bounds.centerLon, bounds.centerLat]
+  let maxArea = -1
+  let bestCx = bounds.centerLon
+  let bestCy = bounds.centerLat
+
+  for (const poly of polys) {
+    const ring = poly[0]
+    if (!ring || ring.length < 3) continue
+    let area = 0
+    let cx = 0
+    let cy = 0
+    for (let i = 0; i < ring.length - 1; i++) {
+      const x0 = ring[i][0]
+      const y0 = ring[i][1]
+      const x1 = ring[i + 1][0]
+      const y1 = ring[i + 1][1]
+      const a = x0 * y1 - x1 * y0
+      area += a
+      cx += (x0 + x1) * a
+      cy += (y0 + y1) * a
+    }
+    area *= 0.5
+    const absArea = Math.abs(area)
+    if (absArea > maxArea) {
+      maxArea = absArea
+      if (absArea > 1e-6) {
+        bestCx = cx / (6 * area)
+        bestCy = cy / (6 * area)
+      } else {
+        let sx = 0
+        let sy = 0
+        for (const p of ring) {
+          sx += p[0]
+          sy += p[1]
+        }
+        bestCx = sx / ring.length
+        bestCy = sy / ring.length
+      }
+    }
   }
-  if (!best) return { map: [0, 0], lonlat: [bounds.centerLon, bounds.centerLat] }
-  let sx = 0,
-    sy = 0
-  for (const [lon, lat] of best) {
-    sx += lon
-    sy += lat
-  }
-  const lon = sx / best.length
-  const lat = sy / best.length
-  return { map: project(lon, lat), lonlat: [lon, lat] }
+  return [bestCx, bestCy]
 }
+
 
 /** Major states to label on the map */
 export const STATE_LABELS: Array<{
