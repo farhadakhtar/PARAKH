@@ -88,7 +88,9 @@ COLUMN_SYNONYMS: Dict[str, str] = {
     "district": "district", "districtname": "district",
     # time
     "financialyear": "financial_year", "fy": "financial_year",
+    "finyear": "financial_year", "fiscalyear": "financial_year",
     "year": "financial_year", "yearofsanction": "financial_year",
+    "yearmonth": "financial_year",
     # scheme / work
     "scheme": "scheme", "schemename": "scheme", "workname": "scheme",
     "projectname": "scheme", "work": "scheme",
@@ -97,6 +99,8 @@ COLUMN_SYNONYMS: Dict[str, str] = {
     "sanctionedamount": "budget_allocated", "allocation": "budget_allocated",
     "budget": "budget_allocated", "approvedcost": "budget_allocated",
     "expenditure": "expenditure", "amountspent": "expenditure",
+    "approvedlabourbudget": "budget_allocated",
+    "totalexpenditure": "expenditure", "expenditureonwages": "expenditure",
     "spent": "expenditure", "utilised": "expenditure",
     "utilized": "expenditure", "expenditureincurred": "expenditure",
     # progress
@@ -153,8 +157,8 @@ AMOUNT_MULTIPLIER = {
 }
 
 AUDIT_COLUMNS: Tuple[str, ...] = (
-    "audit_id", "state", "district", "scheme",
-    "issue_type", "severity", "amount", "source_pdf",
+    "audit_id", "state", "state_source", "district", "financial_year",
+    "scheme", "issue_type", "severity", "amount", "source_pdf",
 )
 
 UNKNOWN = "UNKNOWN"
@@ -186,7 +190,13 @@ def _parse_amount(match: re.Match) -> Optional[float]:
         value = float(raw.replace(",", ""))
     except ValueError:
         return None
-    return value * AMOUNT_MULTIPLIER.get(unit, 1)
+    if unit:
+        return value * AMOUNT_MULTIPLIER[unit]
+    # No unit. A bare "Rs 1" is a table artefact or a column header, not a
+    # finding - audit reports do not report single-rupee irregularities. Below
+    # a thousand rupees the number is discarded rather than recorded as a
+    # magnitude nobody should trust.
+    return value if value >= 1000 else None
 
 
 # ===========================================================================
@@ -387,6 +397,109 @@ def _first_match(text: str, patterns: Sequence[Tuple[str, str]]) -> Optional[str
     return None
 
 
+#: A geography term shorter than this, or carrying no letters, is not a
+#: place name. Real data supplied a state literally called "-", and a naive
+#: substring test made it match 69 of 70 audit paragraphs, because almost
+#: every sentence contains a hyphen. Length plus an alphabetic requirement
+#: kills that whole class of false positive.
+MIN_PLACE_NAME_LENGTH = 4
+
+#: Tokens that appear in a state or district column but are not places. They
+#: arrive from real files: aggregate rows ("Total", "All India") and bare
+#: compass words that are only district names when qualified ("East Delhi",
+#: not every sentence containing "east"). Left in, "Total" was matched as a
+#: state on 14 findings and "EAST"/"CENTRAL" as districts on 14 more.
+PLACE_STOPWORDS = frozenset({
+    "total", "grand total", "sub total", "subtotal", "all india", "india",
+    "others", "other", "unknown", "none", "null", "state", "district",
+    "east", "west", "north", "south", "central", "north east", "north west",
+    "south east", "south west", "urban", "rural", "combined", "average",
+    "male", "female", "person", "persons", "year", "month",
+})
+
+
+def _place_lookup(values: Sequence[str]) -> Dict[str, str]:
+    """Build a lowercase place-name lookup, discarding unusable entries.
+
+    Deduplicated case-insensitively, because the same state arrives as
+    ``JHARKHAND`` from one file and ``Jharkhand`` from another and they must
+    not compete.
+    """
+    lookup: Dict[str, str] = {}
+    for value in values:
+        text = _clean_text(value)
+        if not text or len(text) < MIN_PLACE_NAME_LENGTH:
+            continue
+        if not any(character.isalpha() for character in text):
+            continue
+        if text.lower() in PLACE_STOPWORDS:
+            continue
+        lookup.setdefault(text.lower(), text)
+    return lookup
+
+
+def _find_place(text_lower: str, lookup: Mapping[str, str]) -> Optional[str]:
+    """The first place name occurring as a whole word, or None.
+
+    Word-boundary matching, not substring: "Banka" must not be found inside
+    "embankment".
+    """
+    for key, original in lookup.items():
+        if re.search(rf"\b{re.escape(key)}\b", text_lower):
+            return original
+    return None
+
+
+#: Financial years as audit reports write them: "2020-21", "2020-2021",
+#: "FY 2020-21". The opening year is taken, matching how the structured data
+#: derives its own year from a date.
+FINANCIAL_YEAR_PATTERN = re.compile(
+    r"\b((?:19|20)\d{2})\s*[-/\u2013]\s*(?:\d{2}|\d{4})\b"
+)
+BARE_YEAR_PATTERN = re.compile(r"\b((?:19|20)\d{2})\b")
+
+
+def _find_year(text: str) -> Optional[str]:
+    """A financial year from audit prose, preferring an explicit FY range."""
+    match = FINANCIAL_YEAR_PATTERN.search(text)
+    if match:
+        return match.group(1)
+    match = BARE_YEAR_PATTERN.search(text)
+    return match.group(1) if match else None
+
+
+def _document_year(pages: Sequence[str]) -> Optional[str]:
+    """The financial year a report covers, from its opening pages.
+
+    A report titled "SFAR 2020-21" concerns that year throughout. Used only
+    where a finding names no year of its own, and recorded as such.
+    """
+    return _find_year(" ".join(pages[:4]))
+
+
+def _document_state(pages: Sequence[str], lookup: Mapping[str, str]) -> Optional[str]:
+    """The state a whole report is about, read from its opening pages.
+
+    A CAG state audit report names its state on the cover and in the preface.
+    Every finding inside it concerns that state, so carrying the document
+    state down to a paragraph that does not repeat it is reading the document
+    correctly - not inferring. It is only used where the paragraph itself
+    names no state, and the row records which of the two it came from.
+    """
+    header = " ".join(pages[:4]).lower()
+    if not header.strip():
+        return None
+    best: Optional[str] = None
+    best_count = 0
+    for key, original in lookup.items():
+        count = len(re.findall(rf"\b{re.escape(key)}\b", header))
+        if count > best_count:
+            best, best_count = original, count
+    # One passing mention is not a subject. Requiring several avoids adopting
+    # a state that appears once in a comparison table.
+    return best if best_count >= 3 else None
+
+
 def parse_audit_pdf(
     path: Path, states: Sequence[str], districts: Sequence[str]
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
@@ -411,8 +524,10 @@ def parse_audit_pdf(
     except Exception as exc:  # noqa: BLE001 - a corrupt PDF must not stop the run
         return [], f"{type(exc).__name__}: {exc}"
 
-    state_lookup = {value.lower(): value for value in states if value}
-    district_lookup = {value.lower(): value for value in districts if value}
+    state_lookup = _place_lookup(states)
+    district_lookup = _place_lookup(districts)
+    doc_state = _document_state(pages, state_lookup)
+    doc_year = _document_year(pages)
 
     for page_number, text in enumerate(pages, start=1):
         if not text.strip():
@@ -426,15 +541,17 @@ def parse_audit_pdf(
                 continue
             lowered = cleaned.lower()
             amount_match = AMOUNT_PATTERN.search(cleaned)
+            paragraph_state = _find_place(lowered, state_lookup)
             rows.append(
                 {
                     "audit_id": f"{path.stem}#p{page_number}#{len(rows)}",
-                    "state": next(
-                        (v for k, v in state_lookup.items() if k in lowered), UNKNOWN
+                    "state": paragraph_state or doc_state or UNKNOWN,
+                    "state_source": (
+                        "paragraph" if paragraph_state
+                        else ("document" if doc_state else "none")
                     ),
-                    "district": next(
-                        (v for k, v in district_lookup.items() if k in lowered), UNKNOWN
-                    ),
+                    "district": _find_place(lowered, district_lookup) or UNKNOWN,
+                    "financial_year": _find_year(cleaned) or doc_year or UNKNOWN,
                     "scheme": UNKNOWN,
                     "issue_type": issue,
                     # Absent severity language is MEDIUM only by convention;
@@ -516,7 +633,6 @@ def attach_weak_labels(
         return labelled, stats
 
     audits = audits.copy()
-    audits["_year"] = audits.get("financial_year", pd.Series(dtype=object))
     exact: set = set()
     partial: set = set()
     loose: set = set()
@@ -531,6 +647,8 @@ def attach_weak_labels(
             if district and district != UNKNOWN:
                 covered_cells.add((state.lower(), district.lower()))
 
+    # Lowercased on both sides: the same state arrives as "JHARKHAND" from
+    # one source file and "Jharkhand" from another, and they are one place.
     record_state = labelled["state"].map(lambda v: (_clean_text(v) or "").lower())
     record_district = labelled["district"].map(lambda v: (_clean_text(v) or "").lower())
     record_year = labelled["financial_year"].map(_year_of)
@@ -539,6 +657,8 @@ def attach_weak_labels(
         state = (_clean_text(audit.get("state")) or "").lower()
         district = (_clean_text(audit.get("district")) or "").lower()
         year = _year_of(audit.get("financial_year"))
+        if year and str(audit.get("financial_year")).strip() == UNKNOWN:
+            year = None
         if not state or state == UNKNOWN.lower():
             continue
         in_state = record_state == state
