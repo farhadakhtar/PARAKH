@@ -1,0 +1,21 @@
+file_name,type,usable,reason,size_bytes
+5c2f62fe-5afa-4119-a499-fec9d604d5bd.csv,STRUCTURED_DATA,True,tabular .csv file,23066077
+ADSI_Table_1A.2_2 (1).csv,STRUCTURED_DATA,True,tabular .csv file,5647
+ADSI_Table_1A.2_2 (2).csv,STRUCTURED_DATA,True,tabular .csv file,5647
+ADSI_Table_1A.2_2 (3).csv,STRUCTURED_DATA,True,tabular .csv file,5647
+ADSI_Table_1A.2_2 (4).csv,STRUCTURED_DATA,True,tabular .csv file,5647
+ADSI_Table_1A.2_2.csv,STRUCTURED_DATA,True,tabular .csv file,5647
+datafile.csv,STRUCTURED_DATA,True,tabular .csv file,126922
+ee03643a-ee4c-48c2-ac30-9f2ff26ab722_280635785d117ba0072c36c75015a791.csv,STRUCTURED_DATA,True,tabular .csv file,101051
+farhadthemindhacker_17885957593721356.csv,STRUCTURED_DATA,True,tabular .csv file,2090
+farhadthemindhacker_17885958006465008.csv,STRUCTURED_DATA,True,tabular .csv file,2457
+farhadthemindhacker_1788595819339727.csv,STRUCTURED_DATA,True,tabular .csv file,15157
+farhadthemindhacker_17885958371026134.csv,STRUCTURED_DATA,True,tabular .csv file,39341
+ground_truth_ledger.json,SEMI_STRUCTURED,False,.json read for provenance only; not a source of records (see report.md),1730659
+India-Tourism-Statistics-2022-Table-2.1.4.csv,STRUCTURED_DATA,True,tabular .csv file,6788
+JHR-Report-No.-5-of-2026---English-06a7d9dac5c2060.62464848.pdf,AUDIT_REPORTS,True,PDF whose name marks it an audit report,6166119
+NFHS_5_India_Districts_Factsheet_Data.xls,STRUCTURED_DATA,True,tabular .xls file,757248
+Report-No-05-J&amp;K-PSU-English_20-11-2025-signed-069cabdefec7a77.69528722.pdf,AUDIT_REPORTS,True,PDF whose name marks it an audit report,5266609
+RS_Session_254_AU_2215.csv,STRUCTURED_DATA,True,tabular .csv file,1020
+SFAR 2020-21_Report No. 1 of 2022_(06-07-2022)-063382d7b6c0725.98973622.pdf,AUDIT_REPORTS,True,PDF whose name marks it an audit report,7582872
+synthetic_dataset.csv,STRUCTURED_DATA,True,tabular .csv file,4071622
