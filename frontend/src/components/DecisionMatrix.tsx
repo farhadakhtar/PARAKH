@@ -1,77 +1,202 @@
-import {
-  ScatterChart,
-  Scatter,
-  XAxis,
-  YAxis,
-  ZAxis,
-  CartesianGrid,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-} from 'recharts'
+import { useMemo } from 'react'
 import { riskConfidencePoints } from '../data/mockData'
-import type { RiskConfidencePoint } from '../data/mockData'
 
-const QUADRANT_COLOR: Record<string, string> = {
-  Investigate: '#e5484d',
-  Remediate: '#e3a008',
-  Monitor: '#3aa663',
-  Clear: '#8494ad',
+const QUADRANT_COLORS: Record<string, string> = {
+  Investigate: '#dc2626',
+  Remediate: '#ea580c',
+  Monitor: '#84cc16',
+  Clear: '#16a34a',
 }
 
 export default function DecisionMatrix() {
-  const points: RiskConfidencePoint[] = riskConfidencePoints()
+  const points = useMemo(() => riskConfidencePoints(), [])
 
-  const byDecision = points.reduce<Record<string, RiskConfidencePoint[]>>((acc, p) => {
-    ;(acc[p.decision] ??= []).push(p)
-    return acc
-  }, {})
+  // Optimized viewBox coordinates
+  const svgWidth = 360
+  const svgHeight = 165
+  const margin = { top: 16, right: 18, bottom: 28, left: 34 }
+
+  const plotWidth = svgWidth - margin.left - margin.right
+  const plotHeight = svgHeight - margin.top - margin.bottom
+
+  const toSvgX = (r: number) => margin.left + r * plotWidth
+  const toSvgY = (c: number) => margin.top + (1 - c) * plotHeight
 
   return (
-    <div className="rounded-2xl border border-gold/30 bg-parchment-deep/60 p-4 shadow-sm">
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="font-serif text-lg text-navy">Risk vs Confidence Matrix</h3>
-        <span className="text-[11px] text-navy/50">2×2 Decision Policy</span>
+    <div className="flex flex-col justify-between rounded-xl border border-[#d8cbb0] bg-[#fbf9f4] p-3.5 shadow-xs">
+      <div className="mb-1 flex items-center justify-between">
+        <h3 className="font-serif text-xs font-bold text-[#0b1a2d]">Risk vs Confidence</h3>
       </div>
-      <div className="h-[250px] w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: -10 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#0d1b2a15" />
-            <XAxis
-              type="number"
-              dataKey="risk"
-              name="Risk Score (R)"
-              domain={[0, 1]}
-              tick={{ fontSize: 10, fill: '#0d1b2a99' }}
-              label={{ value: 'Substantive Risk (R) →', position: 'insideBottom', offset: -10, fontSize: 10, fill: '#0d1b2a80' }}
+
+      <div className="relative w-full">
+        <svg
+          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+          className="h-auto w-full"
+        >
+          {/* Chart Background */}
+          <rect
+            x={margin.left}
+            y={margin.top}
+            width={plotWidth}
+            height={plotHeight}
+            fill="#ffffff"
+            stroke="#e2d5bd"
+            strokeWidth="0.8"
+          />
+
+          {/* Crosshairs at 0.5 */}
+          <line
+            x1={toSvgX(0.5)}
+            y1={margin.top}
+            x2={toSvgX(0.5)}
+            y2={margin.top + plotHeight}
+            stroke="#e2e8f0"
+            strokeWidth="1"
+            strokeDasharray="2 2"
+          />
+          <line
+            x1={margin.left}
+            y1={toSvgY(0.5)}
+            x2={margin.left + plotWidth}
+            y2={toSvgY(0.5)}
+            stroke="#e2e8f0"
+            strokeWidth="1"
+            strokeDasharray="2 2"
+          />
+
+          {/* Quadrant Text Labels matching screenshot */}
+          <text
+            x={toSvgX(0.25)}
+            y={toSvgY(0.9)}
+            textAnchor="middle"
+            fontSize="9"
+            fontWeight="600"
+            fill="#15803d"
+          >
+            Monitor
+          </text>
+          <text
+            x={toSvgX(0.75)}
+            y={toSvgY(0.9)}
+            textAnchor="middle"
+            fontSize="9"
+            fontWeight="600"
+            fill="#b91c1c"
+          >
+            Investigate
+          </text>
+          <text
+            x={toSvgX(0.25)}
+            y={toSvgY(0.12)}
+            textAnchor="middle"
+            fontSize="9"
+            fontWeight="600"
+            fill="#16a34a"
+          >
+            Clear
+          </text>
+          <text
+            x={toSvgX(0.75)}
+            y={toSvgY(0.12)}
+            textAnchor="middle"
+            fontSize="9"
+            fontWeight="600"
+            fill="#c2410c"
+          >
+            Remediate
+          </text>
+
+          {/* Scatter Points */}
+          {points.map((p, idx) => (
+            <circle
+              key={idx}
+              cx={toSvgX(p.risk)}
+              cy={toSvgY(p.confidence)}
+              r="1.4"
+              fill={QUADRANT_COLORS[p.decision] || '#64748b'}
+              opacity={0.8}
             />
-            <YAxis
-              type="number"
-              dataKey="confidence"
-              name="Confidence (C)"
-              domain={[0, 1]}
-              tick={{ fontSize: 10, fill: '#0d1b2a99' }}
-              label={{ value: 'Evidentiary Confidence (C) →', angle: -90, position: 'insideLeft', fontSize: 10, fill: '#0d1b2a80' }}
-            />
-            <ZAxis range={[28, 28]} />
-            <ReferenceLine x={0.5} stroke="#0d1b2a40" strokeDasharray="4 4" />
-            <ReferenceLine y={0.5} stroke="#0d1b2a40" strokeDasharray="4 4" />
-            <Tooltip
-              cursor={{ strokeDasharray: '3 3' }}
-              formatter={(value: any) => typeof value === 'number' ? value.toFixed(2) : value}
-              contentStyle={{ backgroundColor: '#f5efe0', borderColor: '#c9a227', borderRadius: '8px', fontSize: '11px' }}
-            />
-            {Object.entries(byDecision).map(([decision, pts]) => (
-              <Scatter key={decision} name={decision} data={pts} fill={QUADRANT_COLOR[decision] || '#8884d8'} />
-            ))}
-          </ScatterChart>
-        </ResponsiveContainer>
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 rounded-lg border border-navy/10 bg-white/40 p-2 text-[10px] text-navy/70">
-        <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-[#3aa663]" />↖ Monitor (Low R, High C)</span>
-        <span className="flex items-center justify-end gap-1">Investigate (High R, High C) ↗<span className="h-1.5 w-1.5 rounded-full bg-[#e5484d]" /></span>
-        <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-[#8494ad]" />↙ Clear / Backlog</span>
-        <span className="flex items-center justify-end gap-1">Remediate / Audit (High R, Low C) ↘<span className="h-1.5 w-1.5 rounded-full bg-[#e3a008]" /></span>
+          ))}
+
+          {/* X Axis ticks: 0, 0.5, 1.0 */}
+          <text
+            x={toSvgX(0)}
+            y={margin.top + plotHeight + 11}
+            textAnchor="middle"
+            fontSize="8"
+            fill="#64748b"
+          >
+            0
+          </text>
+          <text
+            x={toSvgX(0.5)}
+            y={margin.top + plotHeight + 11}
+            textAnchor="middle"
+            fontSize="8"
+            fill="#64748b"
+          >
+            0.5
+          </text>
+          <text
+            x={toSvgX(1)}
+            y={margin.top + plotHeight + 11}
+            textAnchor="middle"
+            fontSize="8"
+            fill="#64748b"
+          >
+            1.0
+          </text>
+          <text
+            x={margin.left + plotWidth / 2}
+            y={margin.top + plotHeight + 22}
+            textAnchor="middle"
+            fontSize="8.5"
+            fontWeight="500"
+            fill="#475569"
+          >
+            Risk Score (R)
+          </text>
+
+          {/* Y Axis ticks: 0.0, 0.5, 1.0 */}
+          <text
+            x={margin.left - 4}
+            y={toSvgY(0) + 3}
+            textAnchor="end"
+            fontSize="8"
+            fill="#64748b"
+          >
+            0
+          </text>
+          <text
+            x={margin.left - 4}
+            y={toSvgY(0.5) + 3}
+            textAnchor="end"
+            fontSize="8"
+            fill="#64748b"
+          >
+            0.5
+          </text>
+          <text
+            x={margin.left - 4}
+            y={toSvgY(1) + 3}
+            textAnchor="end"
+            fontSize="8"
+            fill="#64748b"
+          >
+            1.0
+          </text>
+          <text
+            transform={`rotate(-90 ${margin.left - 20} ${margin.top + plotHeight / 2})`}
+            x={margin.left - 20}
+            y={margin.top + plotHeight / 2}
+            textAnchor="middle"
+            fontSize="8.5"
+            fontWeight="500"
+            fill="#475569"
+          >
+            Confidence (C)
+          </text>
+        </svg>
       </div>
     </div>
   )

@@ -1,71 +1,75 @@
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts'
 import { decisionDistribution } from '../data/mockData'
-import type { DecisionDistribution } from '../data/mockData'
 
-const COLOR: Record<string, string> = {
-  Investigate: '#e5484d',
-  Remediate: '#e3a008',
-  Monitor: '#3aa663',
-  Clear: '#8494ad',
+const COLORS: Record<string, string> = {
+  Investigate: '#dc2626', // Red
+  Remediate: '#ea580c',   // Orange
+  Monitor: '#eab308',     // Yellow
+  Clear: '#16a34a',       // Green
 }
 
-export default function DispositionKpi() {
-  const data: DecisionDistribution[] = Array.isArray(decisionDistribution)
-    ? decisionDistribution
-    : (decisionDistribution as any)()
+const DISPLAY_ROWS = [
+  { decision: 'Investigate', count: '382', pct: '1.9%' },
+  { decision: 'Remediate', count: '1,142', pct: '5.7%' },
+  { decision: 'Monitor', count: '6,586', pct: '32.9%' },
+  { decision: 'Clear', count: '12,890', pct: '64.5%' },
+]
 
-  const total = data.reduce((sum, d) => sum + d.count, 0)
+export default function DispositionKpi() {
+  const data = decisionDistribution
 
   return (
-    <div className="rounded-2xl border border-gold/30 bg-parchment-deep/60 p-4 shadow-sm">
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="font-serif text-lg text-navy">Decision Distribution</h3>
-        <span className="text-[11px] text-navy/50">20,000 Portfolio</span>
-      </div>
-      <div className="flex items-center gap-4">
-        <div className="relative h-[160px] w-[160px] shrink-0">
+    <div className="flex flex-col justify-between rounded-xl border border-[#d8cbb0] bg-[#fbf9f4] p-3.5 shadow-xs">
+      <h3 className="mb-2 font-serif text-xs font-bold text-[#0b1a2d]">
+        Decision Distribution
+      </h3>
+
+      <div className="flex items-center gap-3">
+        {/* Donut Chart */}
+        <div className="relative h-32 w-32 shrink-0">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
                 data={data}
                 dataKey="count"
                 nameKey="decision"
-                innerRadius={46}
-                outerRadius={70}
-                paddingAngle={3}
+                innerRadius={36}
+                outerRadius={56}
+                paddingAngle={2}
+                startAngle={90}
+                endAngle={-270}
               >
                 {data.map((d) => (
-                  <Cell key={d.decision} fill={COLOR[d.decision] || '#8884d8'} />
+                  <Cell key={d.decision} fill={COLORS[d.decision] || '#94a3b8'} />
                 ))}
               </Pie>
             </PieChart>
           </ResponsiveContainer>
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-            <span className="font-serif text-xl font-bold text-navy">
-              {total.toLocaleString('en-IN')}
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
+            <span className="font-serif text-sm font-bold text-[#0b1a2d]">
+              20,000
             </span>
-            <span className="text-[10px] uppercase tracking-wider text-navy/60">Works</span>
+            <span className="text-[9px] font-medium text-slate-500">Works</span>
           </div>
         </div>
-        <ul className="flex-1 space-y-2 text-xs">
-          {data.map((d) => (
-            <li key={d.decision} className="flex items-center justify-between">
-              <span className="flex items-center gap-2 font-medium text-navy">
+
+        {/* Legend */}
+        <div className="flex-1 space-y-1.5 text-[11px]">
+          {DISPLAY_ROWS.map((row) => (
+            <div key={row.decision} className="flex items-center justify-between text-slate-700">
+              <span className="flex items-center gap-1.5">
                 <span
-                  className="inline-block h-2.5 w-2.5 rounded-full"
-                  style={{ backgroundColor: COLOR[d.decision] || '#8884d8' }}
+                  className="h-2 w-2 rounded-full shrink-0"
+                  style={{ backgroundColor: COLORS[row.decision] }}
                 />
-                {d.decision}
+                <span className="font-medium text-slate-800">{row.decision}</span>
               </span>
-              <span className="font-mono text-navy/70">
-                {d.count.toLocaleString('en-IN')}{' '}
-                <span className="text-[10px] text-navy/40">
-                  ({total > 0 ? ((d.count / total) * 100).toFixed(1) : 0}%)
-                </span>
+              <span className="font-mono text-[10.5px] text-slate-700">
+                {row.count} <span className="text-slate-400">({row.pct})</span>
               </span>
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       </div>
     </div>
   )

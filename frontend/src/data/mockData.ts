@@ -81,54 +81,54 @@ export const topRiskDistricts: Array<{
   confidence: number
   records: number
 }> = [
-  { rank: 1, district: 'Gaya', state: 'Bihar', risk: 0.94, confidence: 0.91, records: 612 },
-  { rank: 2, district: 'Jaunpur', state: 'Uttar Pradesh', risk: 0.91, confidence: 0.88, records: 845 },
-  { rank: 3, district: 'Nagaur', state: 'Rajasthan', risk: 0.87, confidence: 0.92, records: 530 },
-  { rank: 4, district: 'Nashik', state: 'Maharashtra', risk: 0.84, confidence: 0.86, records: 477 },
-  { rank: 5, district: 'Paschim Medinipur', state: 'West Bengal', risk: 0.82, confidence: 0.9, records: 661 },
+  { rank: 1, district: 'Sonbhadra', state: 'UP', risk: 0.92, confidence: 0.81, records: 214 },
+  { rank: 2, district: 'Gadchiroli', state: 'MH', risk: 0.88, confidence: 0.76, records: 186 },
+  { rank: 3, district: 'Latehar', state: 'JH', risk: 0.84, confidence: 0.69, records: 143 },
+  { rank: 4, district: 'Koraput', state: 'OD', risk: 0.81, confidence: 0.73, records: 120 },
+  { rank: 5, district: 'Barmer', state: 'RJ', risk: 0.78, confidence: 0.66, records: 118 },
 ]
 
 /** TODO: replace with GET ${API_BASE}/works/high-risk?limit=5 */
 export const recentHighRiskWorks: WorkRecord[] = [
   {
-    work_id: 'WRK-26-88134',
-    work_name: 'Village Road CC Pavement',
-    district: 'Gaya, BR',
-    amount: 1850000,
-    risk: 0.95,
-    status: 'Investigate',
-  },
-  {
-    work_id: 'WRK-26-87902',
-    work_name: 'Drinking Water Pipeline',
-    district: 'Jaunpur, UP',
-    amount: 2430000,
+    work_id: 'WORK-18392',
+    work_name: 'Drain construction',
+    district: 'Delhi',
+    amount: 8000000,
     risk: 0.91,
     status: 'Investigate',
   },
   {
-    work_id: 'WRK-26-87571',
-    work_name: 'Anganwadi Centre Renovation',
-    district: 'Nagaur, RJ',
-    amount: 960000,
-    risk: 0.86,
+    work_id: 'WORK-17621',
+    work_name: 'Road repair',
+    district: 'Sonbhadra',
+    amount: 4500000,
+    risk: 0.87,
+    status: 'Investigate',
+  },
+  {
+    work_id: 'WORK-16211',
+    work_name: 'School repair',
+    district: 'Koraput',
+    amount: 1200000,
+    risk: 0.68,
     status: 'Remediate',
   },
   {
-    work_id: 'WRK-26-87119',
-    work_name: 'Farm Pond Excavation',
-    district: 'Nashik, MH',
-    amount: 720000,
-    risk: 0.83,
-    status: 'Monitor',
+    work_id: 'WORK-15890',
+    work_name: 'Bridge development',
+    district: 'Gadchiroli',
+    amount: 2500000,
+    risk: 0.66,
+    status: 'Remediate',
   },
   {
-    work_id: 'WRK-26-86985',
-    work_name: 'Gram Panchayat Bhawan',
-    district: 'Medinipur, WB',
-    amount: 3110000,
-    risk: 0.81,
-    status: 'Investigate',
+    work_id: 'WORK-14932',
+    work_name: 'Water supply',
+    district: 'Latehar',
+    amount: 1800000,
+    risk: 0.62,
+    status: 'Monitor',
   },
 ]
 
@@ -146,26 +146,41 @@ export const TOTAL_WORKS = decisionDistribution.reduce((s, d) => s + d.count, 0)
 
 /**
  * Scatter points for the Risk-vs-Confidence quadrant chart.
- * TODO: replace with GET ${API_BASE}/records/scatter?sample=200
+ * High-density realistic distribution matching the reference UI scatter plot.
  */
-export function riskConfidencePoints(seed = 42, n = 200): RiskConfidencePoint[] {
+export function riskConfidencePoints(seed = 108): RiskConfidencePoint[] {
   const rand = mulberry32(seed)
   const pts: RiskConfidencePoint[] = []
-  const clusters: Array<[number, number, RiskConfidencePoint['decision'], number]> = [
-    [0.8, 0.78, 'Investigate', 0.14], // high C, high R
-    [0.2, 0.8, 'Monitor', 0.14], //    high C, low R
-    [0.78, 0.2, 'Remediate', 0.15], // low C, high R
-    [0.22, 0.22, 'Clear', 0.16], //    low C, low R
-  ]
-  for (let i = 0; i < n; i++) {
-    const [cx, cy, decision, spread] = clusters[i % clusters.length]
-    const jitter = () => (rand() + rand() - 1) * spread
-    pts.push({
-      risk: Math.min(0.99, Math.max(0.02, cx + jitter())),
-      confidence: Math.min(0.99, Math.max(0.02, cy + jitter())),
-      decision,
-    })
+
+  // Generate dense realistic cluster matching the reference chart:
+  // 1. Monitor (Top-Left: R in 0.08-0.44, C in 0.52-0.96, green/yellow)
+  for (let i = 0; i < 90; i++) {
+    const r = 0.08 + rand() * 0.36
+    const c = 0.52 + rand() * 0.44
+    pts.push({ risk: r, confidence: c, decision: 'Monitor' })
   }
+
+  // 2. Investigate (Top-Right: R in 0.52-0.96, C in 0.52-0.96, red)
+  for (let i = 0; i < 80; i++) {
+    const r = 0.52 + rand() * 0.44
+    const c = 0.52 + rand() * 0.44
+    pts.push({ risk: r, confidence: c, decision: 'Investigate' })
+  }
+
+  // 3. Clear (Bottom-Left: dense band around R: 0.05-0.45, C: 0.05-0.48, green)
+  for (let i = 0; i < 120; i++) {
+    const r = 0.05 + rand() * 0.40
+    const c = 0.05 + rand() * 0.44
+    pts.push({ risk: r, confidence: c, decision: 'Clear' })
+  }
+
+  // 4. Remediate (Bottom-Right: R in 0.52-0.94, C in 0.08-0.48, orange)
+  for (let i = 0; i < 70; i++) {
+    const r = 0.52 + rand() * 0.42
+    const c = 0.08 + rand() * 0.40
+    pts.push({ risk: r, confidence: c, decision: 'Remediate' })
+  }
+
   return pts
 }
 
@@ -184,7 +199,7 @@ export const RISK_BAND_COLORS: Record<RiskBand, string> = {
   'Very High': '#c0392b',
   High: '#e67e22',
   Medium: '#f1c40f',
-  Low: '#a9df8a',
+  Low: '#84c442',
   'Very Low': '#1e8449',
 }
 
@@ -192,7 +207,7 @@ export const RISK_BAND_COLORS: Record<RiskBand, string> = {
 export function riskColor(t: number): string {
   const stops: Array<[number, [number, number, number]]> = [
     [0, [30, 132, 73]],
-    [0.25, [169, 223, 138]],
+    [0.25, [132, 196, 66]],
     [0.5, [241, 196, 15]],
     [0.75, [230, 126, 34]],
     [1, [192, 57, 43]],
@@ -211,3 +226,10 @@ export function riskColor(t: number): string {
 }
 
 export const formatINR = (n: number): string => `₹${n.toLocaleString('en-IN')}`
+
+/** Formats amount in Lakhs (e.g. 8000000 -> ₹80L) matching the reference UI */
+export const formatAmountLakhs = (n: number): string => {
+  const lakhs = n / 100000
+  if (Number.isInteger(lakhs)) return `₹${lakhs}L`
+  return `₹${lakhs.toFixed(1)}L`
+}
