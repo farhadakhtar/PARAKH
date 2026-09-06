@@ -99,111 +99,144 @@ def set_seeds(seed: int) -> None:
     np.random.seed(seed)
 
 
-def build_features(d: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
-    """Bid-distribution screens, computed per tender.
+def build_features(d: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], Dict]:
+    """Bid-distribution screens: aggregate over all tenders, then join.
 
-    MUST be called on the FULL frame, including unlabelled rows. Only 18,807
-    of 3,861,477 rows carry a label, and the sibling bids of a labelled tender
-    are overwhelmingly among the unlabelled ones. Computing screens on the
-    labelled subset alone leaves each tender with a single bid and silently
-    destroys every statistic here. The unlabelled rows supply the tender
-    CONTEXT; they never supply an outcome.
+    MUST see the FULL frame. Only 18,807 of 3,861,477 rows carry a label, and
+    the sibling bids of a labelled tender are overwhelmingly among the
+    unlabelled ones. Computing screens on the labelled subset alone leaves each
+    tender with a single bid and silently destroys every statistic here - the
+    first version did exactly that and scored 0.52 while appearing to work.
+    The unlabelled rows supply tender CONTEXT; they never supply an outcome.
 
-    Named after the literature they come from so a reviewer can check each
-    against its source rather than against this code:
+    Structured as aggregate -> subset -> join rather than broadcast-then-subset.
+    Broadcasting 30 float64 columns across 3.86M rows exhausted memory on a
+    16GB machine; the per-tender table is ~500k rows and the labelled subset is
+    18,807, so this form is roughly two orders of magnitude cheaper and
+    computes the identical values.
 
-    * **CV** - coefficient of variation of bids. Cartels coordinate, which
-      compresses the spread relative to genuine competition.
-    * **SPD** - relative distance between the winning and second bid, scaled
-      by the spread of the losers. The classic Imhof screen: cover bids sit
-      close to the winner while the losing pack is spread out behind.
-    * **DIFFP** - percentage difference between winner and runner-up.
-    * **RD** - relative distance normalised by the standard deviation.
-    * **KURT / SKEW** - a coordinated bid pack is peaked and asymmetric.
-    * **ALTERNATIVE CAPACITY** - the number of distinct bidders and whether
-      the tender drew a single bid at all.
+    Screens, named for the literature so a reviewer can check each against its
+    source rather than against this code:
+
+    * **CV** - coefficient of variation of bids. Coordination compresses spread.
+    * **SPD** - winner-to-runner-up gap scaled by the spread of the LOSING
+      pack. The classic Imhof screen: cover bids hug the winner while the
+      losers trail behind.
+    * **DIFFP** - percentage gap between winner and runner-up.
+    * **RD** - that gap normalised by the tender's standard deviation.
+    * **KURT / SKEW** - a coordinated pack is peaked and asymmetric.
+    * **capacity** - distinct bidders, and whether the tender drew one bid.
 
     Args:
-        d: Labelled bid rows.
+        d: The full frame, labelled and unlabelled together.
 
     Returns:
-        The frame with features attached, and the feature name list.
+        ``(labelled_rows_with_features, feature_names, diagnostics)``.
     """
-    d = d.copy()
-    d["_tid"] = (
-        d[TENDER_KEY].astype(str).agg("|".join, axis=1)
-    )
-
     price = pd.to_numeric(d["bid_price"], errors="coerce")
-    d["_price"] = price.where(price > 0)
+    tid = d[TENDER_KEY].astype(str).agg("|".join, axis=1)
 
-    g = d.groupby("_tid")["_price"]
-    d["t_n_bids"] = g.transform("size")
-    d["t_mean"] = g.transform("mean")
-    d["t_std"] = g.transform("std")
-    d["t_min"] = g.transform("min")
-    d["t_max"] = g.transform("max")
+    work = pd.DataFrame({
+        "_tid": tid,
+        "_price": price.where(price > 0).astype("float32"),
+    })
 
-    # CV: the single most cited screen. Undefined for one-bid tenders, and
-    # left NaN there rather than filled - a tender with no competition has no
-    # spread, which is a different fact from a spread of zero.
-    d["scr_cv"] = d["t_std"] / d["t_mean"].replace(0, np.nan)
+    # --- per-tender aggregates over EVERY bid, labelled or not -------------
+    g = work.groupby("_tid", sort=False)["_price"]
+    agg = pd.DataFrame({
+        "t_n": g.size().astype("int32"),
+        "t_mean": g.mean().astype("float32"),
+        "t_std": g.std().astype("float32"),
+        "t_min": g.min().astype("float32"),
+        "t_max": g.max().astype("float32"),
+        "t_kurt": g.apply(pd.Series.kurt).astype("float32"),
+        "t_skew": g.apply(pd.Series.skew).astype("float32"),
+    })
 
-    # Winner/runner-up geometry. Rank within tender, then read off the top two.
-    d["_rank"] = d.groupby("_tid")["_price"].rank(method="first")
-    first = d[d["_rank"] == 1].set_index("_tid")["_price"]
-    second = d[d["_rank"] == 2].set_index("_tid")["_price"]
-    d["_p1"] = d["_tid"].map(first)
-    d["_p2"] = d["_tid"].map(second)
+    # Winner and runner-up: the two cheapest order statistics, taken by
+    # sorting once rather than ranking 3.86M rows in place.
+    ordered = work.dropna(subset=["_price"]).sort_values(["_tid", "_price"])
+    firsts = ordered.groupby("_tid", sort=False)["_price"]
+    agg["t_p1"] = firsts.nth(0).astype("float32")
+    agg["t_p2"] = firsts.nth(1).astype("float32")
 
-    d["scr_diffp"] = (d["_p2"] - d["_p1"]) / d["_p1"].replace(0, np.nan)
-    d["scr_rd"] = (d["_p2"] - d["_p1"]) / d["t_std"].replace(0, np.nan)
-
-    # SPD: winner-to-runner-up gap against the spread of the LOSING pack only.
-    losers_std = (
-        d[d["_rank"] > 1].groupby("_tid")["_price"].std().rename("_ls")
+    # Spread of the LOSING pack only - the denominator that makes SPD a
+    # different statistic from RD.
+    losers = ordered[ordered.groupby("_tid", sort=False).cumcount() > 0]
+    agg["t_loser_std"] = (
+        losers.groupby("_tid", sort=False)["_price"].std().astype("float32")
     )
-    d["_ls"] = d["_tid"].map(losers_std)
-    d["scr_spd"] = (d["_p2"] - d["_p1"]) / d["_ls"].replace(0, np.nan)
 
-    d["scr_kurt"] = d["_tid"].map(d.groupby("_tid")["_price"].apply(pd.Series.kurt))
-    d["scr_skew"] = d["_tid"].map(d.groupby("_tid")["_price"].apply(pd.Series.skew))
+    diagnostics = {
+        "n_tenders": int(len(agg)),
+        "median_bids_per_tender": float(agg["t_n"].median()),
+        "tenders_with_2plus_bids": float((agg["t_n"] >= 2).mean()),
+    }
+    del work, ordered, losers, g, firsts
 
-    d["scr_range_ratio"] = (d["t_max"] - d["t_min"]) / d["t_mean"].replace(0, np.nan)
-    d["scr_n_bids"] = pd.to_numeric(d["lot_bidscount"], errors="coerce").fillna(
-        d["t_n_bids"]
+    # --- now subset to labelled rows, THEN join ---------------------------
+    keep = d["labelled"].to_numpy()
+    out = d.loc[keep].copy()
+    out["_tid"] = tid[keep].to_numpy()
+    del tid
+    out["_price"] = price[keep].astype("float32").to_numpy()
+    del price
+    out = out.join(agg, on="_tid")
+    del agg
+
+    nan = np.nan
+    out["scr_cv"] = out["t_std"] / out["t_mean"].replace(0, nan)
+    out["scr_diffp"] = (out["t_p2"] - out["t_p1"]) / out["t_p1"].replace(0, nan)
+    out["scr_rd"] = (out["t_p2"] - out["t_p1"]) / out["t_std"].replace(0, nan)
+    out["scr_spd"] = (
+        (out["t_p2"] - out["t_p1"]) / out["t_loser_std"].replace(0, nan)
     )
-    d["scr_singleb"] = pd.to_numeric(d["singleb"], errors="coerce").fillna(0)
+    out["scr_kurt"] = out["t_kurt"]
+    out["scr_skew"] = out["t_skew"]
+    out["scr_range_ratio"] = (
+        (out["t_max"] - out["t_min"]) / out["t_mean"].replace(0, nan)
+    )
+    out["scr_n_bids"] = pd.to_numeric(
+        out["lot_bidscount"], errors="coerce"
+    ).fillna(out["t_n"])
+    out["scr_singleb"] = pd.to_numeric(out["singleb"], errors="coerce")
 
-    # Bid against the buyer's own estimate: over-estimate capture is a
-    # separate signal from bid-pack shape.
-    est = pd.to_numeric(d["lot_estimatedprice"], errors="coerce").replace(0, np.nan)
-    d["scr_price_to_est"] = d["_price"] / est
+    est = pd.to_numeric(out["lot_estimatedprice"], errors="coerce").replace(0, nan)
+    out["scr_price_to_est"] = out["_price"] / est
+    out["scr_price_to_tender_mean"] = out["_price"] / out["t_mean"].replace(0, nan)
 
-    d["scr_is_winner"] = pd.to_numeric(d["bid_iswinning"], errors="coerce").fillna(0)
-    d["scr_consortium"] = pd.to_numeric(d["bid_isconsortium"], errors="coerce").fillna(0)
-    d["scr_subcontracted"] = pd.to_numeric(
-        d["bid_issubcontracted"], errors="coerce"
-    ).fillna(0)
+    out["scr_is_winner"] = pd.to_numeric(out["bid_iswinning"], errors="coerce")
+    out["scr_consortium"] = pd.to_numeric(out["bid_isconsortium"], errors="coerce")
+    out["scr_subcontracted"] = pd.to_numeric(
+        out["bid_issubcontracted"], errors="coerce"
+    )
 
-    # Bidder-level experience. Computed on the WHOLE labelled frame, which is
-    # a mild transductive leak but a structural feature rather than an outcome
-    # one; flagged here so it is not mistaken for a clean design.
-    d["scr_bidder_freq"] = d.groupby("bidder_id")["bidder_id"].transform("size")
-    d["scr_buyer_freq"] = d.groupby("buyer_id")["buyer_id"].transform("size")
+    # Bidder/buyer activity, counted on the FULL frame so it reflects real
+    # market presence rather than presence among prosecuted cases.
+    out["scr_bidder_freq"] = (
+        out["bidder_id"].map(d["bidder_id"].value_counts()).astype("float32")
+    )
+    out["scr_buyer_freq"] = (
+        out["buyer_id"].map(d["buyer_id"].value_counts()).astype("float32")
+    )
 
-    names = [c for c in d.columns if c.startswith("scr_")]
+    names = [c for c in out.columns if c.startswith("scr_")]
 
-    # Every screen gets an explicit definedness flag. A NaN screen means the
-    # tender could not support it (one bid, no estimate), which is different
-    # from a screen that computed to zero - and the difference is exactly what
-    # separates "no competition" from "perfectly tied competition".
+    # Every screen carries a definedness flag. A NaN screen means the tender
+    # could not support it (one bid, no estimate); that is a different fact
+    # from a screen that computed to zero, and the difference separates "no
+    # competition" from "perfectly tied competition".
     for n in list(names):
-        d[n + "_ok"] = d[n].notna().astype(int)
+        out[n + "_ok"] = out[n].notna().astype("int8")
     names += [n + "_ok" for n in names]
 
-    d[names] = d[names].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    return d, names
+    out[names] = (
+        out[names].replace([np.inf, -np.inf], nan).fillna(0.0).astype("float32")
+    )
+    diagnostics["labelled_with_defined_screens"] = float(
+        (out["t_n"] >= 2).mean()
+    )
+    return out, names, diagnostics
 
 
 def auc_ci(auc: float, n_pos: int, n_neg: int) -> float:
@@ -317,19 +350,14 @@ def main() -> None:
     print("=" * 78, flush=True)
 
     # Screens over the whole frame, THEN subset. The order is the fix.
-    d, feats = build_features(d)
+    d, feats, diag = build_features(d)
     print(f"\n{len(feats)} screen features built on the full frame")
-
-    sizes = d.groupby("_tid")["_tid"].transform("size")
-    true_n = pd.to_numeric(d["lot_bidscount"], errors="coerce")
-    print(f"  tender reconstruction: median {sizes.median():.0f} bids/group, "
-          f"{float((sizes == true_n).mean()):.1%} exact vs lot_bidscount")
-
-    d = d[d["labelled"]].copy()
-    usable = float((sizes[d.index] >= 2).mean()) if len(d) else 0.0
+    print(f"  tenders reconstructed: {diag['n_tenders']:,}  "
+          f"median {diag['median_bids_per_tender']:.0f} bids  "
+          f"{diag['tenders_with_2plus_bids']:.1%} have >= 2 bids")
     print(f"  labelled rows kept: {len(d):,}  "
-          f"({usable:.1%} sit in a tender with >= 2 bids, so their screens "
-          "are defined)")
+          f"({diag['labelled_with_defined_screens']:.1%} sit in a tender with "
+          ">= 2 bids, so their screens are defined)")
     print(f"  positives {int(d.is_cartel.sum()):,}   negatives "
           f"{int((1 - d.is_cartel).sum()):,}   cartels "
           f"{d.cartel_id.nunique()}   countries {d.country.nunique()}",
@@ -343,6 +371,7 @@ def main() -> None:
         "n_rows_labelled": int(len(d)),
         "n_features": len(feats),
         "_tender_key": TENDER_KEY,
+        "tender_diagnostics": diag,
         "_tender_reconstruction": (
             "No tender_id exists in the source. Screens use a reconstructed "
             "key with ~21% exact agreement against lot_bidscount, so every "
