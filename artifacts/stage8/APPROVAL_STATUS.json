@@ -1,0 +1,71 @@
+{
+  "stage8_status": "COVERAGE_FAILURE",
+  "generated": "2026-09-06",
+  "git_commit": "48917ed",
+  "python": "3.12.4",
+  "calibrated_risk": null,
+  "gates": {
+    "G1_DATA_VALIDITY": {
+      "status": "PASS",
+      "detail": "20,000 synthetic dev records + 12 real Data/ files inventoried; provenance recorded per file."
+    },
+    "G2_LABEL_VALIDITY": {
+      "status": "FAIL",
+      "detail": "0 verified positives, 0 verified negatives at calibration-eligible evidence. NULL was not converted to 0."
+    },
+    "G3_FEATURE_AVAILABILITY": {
+      "status": "FAIL",
+      "detail": "0 labelled rows carry budget/expenditure features; no bid table exists anywhere."
+    },
+    "G4_COVERAGE": {
+      "status": "FAIL",
+      "detail": "Audit year {2020-21} vs structured years {2023-24..2026-27}: intersection empty. 1 state in common."
+    },
+    "G5_LEAKAGE": {
+      "status": "PASS",
+      "detail": "6 feature(s), none target-derived"
+    },
+    "G6_TEMPORAL_GENERALIZATION": {
+      "status": "NOT_EVALUABLE",
+      "detail": "No labels, so no performance to measure across time."
+    },
+    "G7_PROBABILITY_CALIBRATION": {
+      "status": "NOT_EVALUABLE",
+      "detail": "Blocked by G2/G4. Stage 8 calibrate() returns INSUFFICIENT_LABELS."
+    },
+    "G8_ARTIFACT_INVARIANCE": {
+      "status": "NOT_EVALUABLE",
+      "detail": "Dev corpus has a single source_file, so no artifact grouping has 2 classes. Re-run when multi-source real data exists."
+    },
+    "G9_STABILITY": {
+      "status": "NOT_RUN",
+      "detail": "Requires re-running Stages 3-5 per subsample; not executed this pass."
+    },
+    "G10_OPERATIONAL_UTILITY": {
+      "status": "NOT_EVALUABLE",
+      "detail": "Precision@K needs outcomes."
+    },
+    "G11_EXPLAINABILITY": {
+      "status": "PASS",
+      "detail": "Every record carries risk_explanation and a canonical explanation_payload from Stage 6."
+    }
+  },
+  "n_gates": 11,
+  "n_passed": 3,
+  "blocking_gates": [
+    "G2_LABEL_VALIDITY",
+    "G3_FEATURE_AVAILABILITY",
+    "G4_COVERAGE",
+    "G6_TEMPORAL_GENERALIZATION",
+    "G7_PROBABILITY_CALIBRATION",
+    "G8_ARTIFACT_INVARIANCE",
+    "G9_STABILITY",
+    "G10_OPERATIONAL_UTILITY"
+  ],
+  "_verdict": "Stage 8 REFUSES to calibrate. The binding constraint is data coverage, not model quality: the single available audit report covers a financial year that no structured dataset covers. No threshold was fitted, no label was manufactured, and no gate was weakened.",
+  "_what_would_change_it": [
+    "District- or work-level PMGSY financial data for FY2020-21 covering Nagaland (OMMAS).",
+    "Audit SCOPE, not just findings - which units were examined and cleared. Without scope there are no negatives and NULL is the only honest value.",
+    "Tender-level bid data (tender_id, bid_amount, is_winner, n_bidders) to make the bid-rigging typologies reachable at all."
+  ]
+}

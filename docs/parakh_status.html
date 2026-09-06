@@ -1,0 +1,627 @@
+<title>PARAKH Stage 8 Status Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+:root {
+  --ground:      #eef2f0;
+  --surface:     #fbfcfb;
+  --surface-alt: #e7ecea;
+  --line:        #cfd8d4;
+  --line-soft:   #dfe6e3;
+  --ink:         #12181d;
+  --ink-soft:    #48544f;
+  --ink-faint:   #6f7c77;
+  --accent:      #2c6e63;
+  --accent-soft: #d9e8e4;
+  --live:        #2f7d52;
+  --live-bg:     #dcecdf;
+  --gated:       #8a6111;
+  --gated-bg:    #f2e8cf;
+  --blocked:     #a83a2c;
+  --blocked-bg:  #f4dcd8;
+  --running:     #2a5f8f;
+  --running-bg:  #dbe6f0;
+
+  --display: "Newsreader", ui-serif, Georgia, serif;
+  --body: "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #0d1211;
+    --surface:     #141b19;
+    --surface-alt: #1b2422;
+    --line:        #2c3936;
+    --line-soft:   #222d2a;
+    --ink:         #e6edea;
+    --ink-soft:    #a9b6b1;
+    --ink-faint:   #7d8a85;
+    --accent:      #5aa898;
+    --accent-soft: #1c302c;
+    --live:        #5cb17f;
+    --live-bg:     #16301f;
+    --gated:       #cfa040;
+    --gated-bg:    #322709;
+    --blocked:     #e0705f;
+    --blocked-bg:  #341714;
+    --running:     #6fa5d8;
+    --running-bg:  #12242f;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground:      #0d1211;
+  --surface:     #141b19;
+  --surface-alt: #1b2422;
+  --line:        #2c3936;
+  --line-soft:   #222d2a;
+  --ink:         #e6edea;
+  --ink-soft:    #a9b6b1;
+  --ink-faint:   #7d8a85;
+  --accent:      #5aa898;
+  --accent-soft: #1c302c;
+  --live:        #5cb17f;
+  --live-bg:     #16301f;
+  --gated:       #cfa040;
+  --gated-bg:    #322709;
+  --blocked:     #e0705f;
+  --blocked-bg:  #341714;
+  --running:     #6fa5d8;
+  --running-bg:  #12242f;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+}
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 22px;
+  border-bottom: 2px solid var(--ink);
+}
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 6px;
+}
+
+h1 {
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: clamp(30px, 5vw, 44px);
+  line-height: 1.08;
+  margin: 0;
+  text-wrap: balance;
+  letter-spacing: -0.015em;
+}
+
+.stamp {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 10px 16px;
+  border: 2px solid var(--blocked);
+  color: var(--blocked);
+  background: var(--blocked-bg);
+  border-radius: 2px;
+  transform: rotate(-1.2deg);
+  white-space: nowrap;
+}
+
+.lede {
+  font-family: var(--display);
+  font-size: 19px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  max-width: 64ch;
+  margin: 0;
+}
+
+/* ---------- sections ---------- */
+
+section { display: flex; flex-direction: column; gap: 16px; }
+
+h2 {
+  font-family: var(--body);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+h3 {
+  font-family: var(--display);
+  font-size: 21px;
+  font-weight: 500;
+  margin: 0 0 2px;
+  text-wrap: balance;
+}
+
+p { margin: 0; max-width: 68ch; }
+.dim { color: var(--ink-soft); }
+strong { font-weight: 600; }
+
+/* ---------- running panel ---------- */
+
+.runs { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+
+.run {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--running);
+  border-radius: 3px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.run-top { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+.run-name { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+
+.pulse {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.1em; color: var(--running);
+  background: var(--running-bg); padding: 3px 9px; border-radius: 999px;
+}
+.pulse::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--running); animation: blink 1.8s ease-in-out infinite;
+}
+@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .pulse::before { animation: none; } }
+
+.run dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; }
+.run dt { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); letter-spacing: 0.04em; }
+.run dd { margin: 0; color: var(--ink-soft); }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+/* ---------- the catch ---------- */
+
+.catch {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--accent);
+  border-radius: 3px;
+  padding: 24px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.table-scroll { overflow-x: auto; }
+
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th {
+  text-align: left; font-family: var(--mono); font-size: 10.5px;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint);
+  font-weight: 500; padding: 0 14px 8px 0; border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+td { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+code {
+  font-family: var(--mono); font-size: 0.9em;
+  background: var(--surface-alt); padding: 1px 5px; border-radius: 2px;
+}
+
+.wrong { color: var(--blocked); font-weight: 600; }
+.right { color: var(--live); font-weight: 600; }
+
+/* ---------- state pills ---------- */
+
+.pill {
+  display: inline-block; font-family: var(--mono); font-size: 10px;
+  font-weight: 600; letter-spacing: 0.07em; padding: 3px 8px;
+  border-radius: 2px; white-space: nowrap;
+}
+.p-live    { color: var(--live);    background: var(--live-bg); }
+.p-gated   { color: var(--gated);   background: var(--gated-bg); }
+.p-blocked { color: var(--blocked); background: var(--blocked-bg); }
+.p-run     { color: var(--running); background: var(--running-bg); }
+
+/* ---------- blockers ---------- */
+
+.blockers { display: flex; flex-direction: column; gap: 12px; }
+
+.blocker {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blocked);
+  border-radius: 3px;
+  padding: 18px 22px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 20px;
+  align-items: start;
+}
+.blocker h3 { grid-column: 1; }
+.blocker .pill { grid-column: 2; grid-row: 1; justify-self: end; }
+.blocker p { grid-column: 1 / -1; font-size: 14px; }
+
+.proof {
+  grid-column: 1 / -1;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.75;
+  background: var(--surface-alt);
+  border-radius: 3px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--ink-soft);
+}
+
+/* ---------- asks ---------- */
+
+.asks { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
+.ask {
+  background: var(--accent-soft);
+  border-radius: 3px;
+  padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ask .rank {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: 0.1em; color: var(--accent);
+}
+.ask h3 { font-size: 17px; }
+.ask p { font-size: 13.5px; color: var(--ink-soft); }
+
+footer {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+  display: flex; flex-wrap: wrap; gap: 6px 24px;
+  font-family: var(--mono);
+}
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">PARAKH · Stage 8 · Empirical Validation</p>
+      <h1>Status Board</h1>
+    </div>
+    <div class="stamp">COVERAGE_FAILURE · 3/11 GATES</div>
+  </header>
+
+  <p class="lede">
+    Two models are training on Kaggle right now. Neither of them detects fraud,
+    and that is not a bug in the models — it is the state of the data. This page
+    says what is running, what changed, and precisely what is missing.
+  </p>
+
+  <section>
+    <h2>Running right now</h2>
+    <div class="runs">
+
+      <div class="run">
+        <div class="run-top">
+          <span class="run-name">parakh-encoder-bench</span>
+          <span class="pulse">RUNNING</span>
+        </div>
+        <dl>
+          <dt>asks</dt><dd>Which multilingual encoder actually knows that <em>sadak</em> = <em>road</em>?</dd>
+          <dt>method</dt><dd>Probes 10 open-weight encoders (MuRIL, IndicBERT, XLM-R, LaBSE…) on synonym pairs vs. unrelated controls</dd>
+          <dt>gate</dt><dd>separation &gt; 0.05 or we keep TF-IDF</dd>
+          <dt>runtime</dt><dd>~15 min, GPU</dd>
+        </dl>
+        <a href="https://www.kaggle.com/code/farhadastrodent/parakh-encoder-bench">View on Kaggle →</a>
+      </div>
+
+      <div class="run" style="border-left-color: var(--gated)">
+        <div class="run-top">
+          <span class="run-name">parakh-consistency-long-run</span>
+          <span class="pill p-gated">DONE &middot; WEAK</span>
+        </div>
+        <dl>
+          <dt>ran</dt><dd>500,000 records · 100 epochs · converged at epoch 94 · 10 min</dd>
+          <dt>result</dt><dd>Defect AUC 0.53&ndash;0.58. Flat from epoch 10 onward &mdash; more compute changes nothing.</dd>
+          <dt>meaning</dt><dd>The signal ceiling is the data, not the model. It never used its 8-hour budget.</dd>
+        </dl>
+        <a href="https://www.kaggle.com/code/farhadastrodent/parakh-consistency-long-run">View on Kaggle &rarr;</a>
+      </div>
+
+    </div>
+    <p class="dim" style="font-size:13.5px">
+      Both log the <strong>real metric</strong> &mdash; per-channel defect AUC &mdash; every
+      10 epochs, not just loss. That is how we caught this: the long run reported
+      <em>&ldquo;CONVERGED, gap controlled&rdquo;</em> on its loss curve while the metric
+      that matters sat at 0.57. Loss convergence is not task performance.
+    </p>
+  </section>
+
+  <section>
+    <h2>The most important thing that happened today</h2>
+    <div class="catch">
+      <h3>Three of our five legal citations were wrong. The gate caught them.</h3>
+      <p>
+        Every compliance rule shipped locked — able to run its logic, unable to
+        emit a finding — until someone checked its clause against the real
+        document. We downloaded GFR 2017 from the Department of Expenditure and
+        checked. Here is what came back:
+      </p>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>What we had written</th><th>What GFR 2017 actually says</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="wrong">Rule 155</span> = Advertised Tender Enquiry</td>
+              <td>Rule 155 = purchase by committee, ₹25k–₹2.5L.<br>Advertised Tender is <span class="right">Rule 161</span>.</td>
+            </tr>
+            <tr>
+              <td><span class="wrong">Rule 154</span> = Limited Tender Enquiry</td>
+              <td>Rule 154 = purchase without quotations, ≤ ₹25k.<br>Limited Tender is <span class="right">Rule 162</span>.</td>
+            </tr>
+            <tr>
+              <td><span class="wrong">Rule 230</span> = Utilisation Certificates</td>
+              <td>Rule 230 = grants-in-aid principles.<br>UC timing is <span class="right">Rule 238</span> — and runs from financial-year close, not completion.</td>
+            </tr>
+            <tr>
+              <td><span class="wrong">≥ 3 bidders</span> for limited tender</td>
+              <td>Rule 162 says <span class="right">“more than three”</span> — so the minimum is <strong>four</strong>. Our check would have passed every 3-firm tender it exists to catch.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Had those rules been live, they would have flagged real public-works
+        records against a legal basis that does not exist. Three are now verified
+        against the source PDF and switched on; two stay locked.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>A number we published, and then corrected</h2>
+    <div class="catch" style="border-top-color: var(--gated)">
+      <h3>We quoted 0.699. The real value is 0.573.</h3>
+      <p>
+        An early small run measured the consistency model at
+        <code>cost_outlier AUC 0.699</code> and we put it in this document as the
+        bar to beat. It came from <strong>171 positive examples</strong> and we
+        published it without an error bar.
+      </p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Channel</th><th>Small run (n&asymp;140)</th><th>Long run (n&asymp;2,900)</th><th>Consistent?</th></tr></thead>
+          <tbody>
+            <tr><td>cost_outlier</td><td class="num">0.699 &plusmn;0.045</td><td class="num">0.573 &plusmn;0.011</td><td><span class="wrong">no overlap</span></td></tr>
+            <tr><td>date_order</td><td class="num">0.608 &plusmn;0.051</td><td class="num">0.577 &plusmn;0.012</td><td>yes</td></tr>
+            <tr><td>overspend</td><td class="num">0.596 &plusmn;0.057</td><td class="num">0.534 &plusmn;0.013</td><td>marginal</td></tr>
+            <tr><td>agency_mismatch</td><td class="num">0.548 &plusmn;0.057</td><td class="num">0.538 &plusmn;0.013</td><td>yes</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The 20&times; larger sample did not make the model worse &mdash; it measured
+        it properly for the first time. <strong>Treat 0.53&ndash;0.58 as the real
+        range</strong>, which is a weak signal: useful for ranking a queue, not
+        for deciding anything on its own.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where every piece stands</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Component</th><th>State</th><th>Evidence</th><th>Tests</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Record matcher</strong><br><span class="dim">audit finding → record</span></td>
+            <td><span class="pill p-live">WORKING</span></td>
+            <td class="num">462× fewer comparisons, identical output<br><span class="dim">400,000 → 866</span></td>
+            <td class="num">33</td>
+          </tr>
+          <tr>
+            <td><strong>Compliance rules</strong><br><span class="dim">GFR / CVC / CPWD</span></td>
+            <td><span class="pill p-live">3 LIVE</span> <span class="pill p-gated">2 LOCKED</span></td>
+            <td>Rules 161, 162, 166 verified against the GFR PDF.<br>Rule 238 (UC) + CPWD await a human read.</td>
+            <td class="num">23</td>
+          </tr>
+          <tr>
+            <td><strong>Injection pipeline</strong><br><span class="dim">Hindi/Devanagari vectorisation</span></td>
+            <td><span class="pill p-live">BUILT</span></td>
+            <td>Handles nukta, zero-width joiners, ०-९, danda.<br><span class="dim">Untested on real Hindi — our corpus is 100% Latin.</span></td>
+            <td class="num">31</td>
+          </tr>
+          <tr>
+            <td><strong>Consistency model</strong><br><span class="dim">masked-field NN</span></td>
+            <td><span class="pill p-gated">WEAK SIGNAL</span></td>
+            <td class="num">cost_outlier 0.573 &plusmn;0.011<br>date_order 0.577 &plusmn;0.012<br><span class="dim">500k records, n=3,382 positives</span></td>
+            <td class="num">&mdash;</td>
+          </tr>
+          <tr>
+            <td><strong>Fraud typologies</strong><br><span class="dim">bid rotation, cover bidding…</span></td>
+            <td><span class="pill p-blocked">2 of 5 REACHABLE</span></td>
+            <td>Three need a bid table that does not exist in any dataset we hold.</td>
+            <td class="num">—</td>
+          </tr>
+          <tr>
+            <td><strong>Risk calibration</strong><br><span class="dim">score → probability</span></td>
+            <td><span class="pill p-blocked">REFUSED</span></td>
+            <td>Zero verified outcomes. Stage 8 returns <code>calibrated_risk = None</code>.</td>
+            <td class="num">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="dim" style="font-size:13.5px">
+      Full suite: <strong>1,576 tests passing</strong>, zero regressions.
+    </p>
+  </section>
+
+  <section>
+    <h2>What is blocked, and exactly why</h2>
+    <div class="blockers">
+
+      <div class="blocker">
+        <h3>Calibration cannot run — the years do not overlap</h3>
+        <span class="pill p-blocked">HARD BLOCK</span>
+        <p>
+          Our only audit report and our only financial data describe different
+          years. There is no join to make. This is not a modelling problem and no
+          model fixes it.
+        </p>
+        <div class="proof">audit evidence     CAG SFAR, Government of Nagaland, FY 2020-21
+financial data     PMGSY state-year, FY 2023-24 · 24-25 · 25-26 · 26-27
+
+year intersection  EMPTY
+state intersection {NAGALAND}  → one state
+work-level match   impossible — no dataset carries a work ID</div>
+      </div>
+
+      <div class="blocker">
+        <h3>Bid-rigging is invisible — we have never modelled a competition</h3>
+        <span class="pill p-blocked">HARD BLOCK</span>
+        <p>
+          Bid rotation, cover bidding and single-bidder concentration all need to
+          know who <em>else</em> bid. No dataset we hold has a bid table, and the
+          corpus schema has no concept of a tender.
+        </p>
+        <div class="proof">missing everywhere   tender_id · bid_amount · is_winner · n_bidders
+consequence          3 of 5 typologies unreachable, at any model size</div>
+      </div>
+
+      <div class="blocker">
+        <h3>There are no negatives — and there cannot be without audit scope</h3>
+        <span class="pill p-blocked">HARD BLOCK</span>
+        <p>
+          A calibration curve needs both outcomes. We can find what auditors
+          <em>flagged</em>; we cannot find what they examined and cleared. Without
+          that, “no finding” and “never audited” are the same row, and the honest
+          label stays NULL.
+        </p>
+        <div class="proof">confirmed issues   findable from audit reports
+cleared records    NOT findable — requires audit SCOPE, not findings
+result             single-class data; no curve can be fitted</div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>What we need — ranked by what it unlocks</h2>
+    <div class="asks">
+
+      <div class="ask">
+        <span class="rank">HIGHEST VALUE</span>
+        <h3>Tender-level bid data</h3>
+        <p>
+          From CPPP (<code>eprocure.gov.in</code>) or a state e-procurement portal.
+          Unlocks the entire bid-rigging class — three typologies that are
+          currently unreachable for want of data, not modelling.
+        </p>
+      </div>
+
+      <div class="ask">
+        <span class="rank">CHEAPEST WIN</span>
+        <h3>Two clause readings</h3>
+        <p>
+          Someone reads GFR Rule 238 and the CPWD Works Manual and confirms two
+          clauses. That flips the last two compliance rules live. Roughly twenty
+          minutes of a person who knows procurement.
+        </p>
+      </div>
+
+      <div class="ask">
+        <span class="rank">FIXES COVERAGE</span>
+        <h3>OMMAS district-level PMGSY</h3>
+        <p>
+          District or work level, FY 2020-21, covering Nagaland — matching the
+          audit report we already hold. Closes the year gap that blocks every
+          supervised experiment.
+        </p>
+      </div>
+
+      <div class="ask">
+        <span class="rank">UNLOCKS CALIBRATION</span>
+        <h3>Audit scope documents</h3>
+        <p>
+          Not findings — <em>scope</em>. Which units, districts and years an audit
+          actually examined. This is the only thing that creates negatives, and
+          therefore the only thing that makes calibration possible at all.
+        </p>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Read this before quoting any number</h2>
+    <div class="catch">
+      <p>
+        <strong>Nothing in PARAKH detects fraud today.</strong> The models being
+        trained find records that contradict themselves and works that resemble
+        each other. Both are useful — they tell an investigator where to look —
+        and neither is an accusation.
+      </p>
+      <p>
+        The compliance rules find <em>irregularity</em>, which is also not fraud.
+        An emergency repair done without tender breaks a rule and defrauds nobody.
+        A flawless tender whose losing bidders are shells owned by the winner
+        passes every check we have.
+      </p>
+      <p>
+        Every risk threshold in the system is still a stated judgement, labelled
+        <code>UNCALIBRATED</code>, because calibrating one requires outcomes we do
+        not have. That label stays until the blockers above are cleared.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <span>PARAKH Stage 8</span>
+    <span>6 September 2026</span>
+    <span>1,576 tests passing</span>
+    <span>artifacts/stage8/STAGE8_REPORT.md</span>
+  </footer>
+
+</div>

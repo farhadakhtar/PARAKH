@@ -1,0 +1,37 @@
+{
+  "leakage": {
+    "gate": "G5_LEAKAGE",
+    "status": "PASS",
+    "detail": "6 feature(s), none target-derived",
+    "n_features": 6,
+    "checked_against": [
+      "action_class",
+      "audit_date",
+      "audit_outcome",
+      "audit_page",
+      "audit_paragraph",
+      "audit_report",
+      "audit_scope",
+      "audit_severity",
+      "audit_source",
+      "decision_class",
+      "defect_type",
+      "evidence_level",
+      "ground_truth",
+      "injected_defect",
+      "investigation_result",
+      "issue_type",
+      "label",
+      "match_confidence",
+      "match_method",
+      "outcome",
+      "priority_level",
+      "resolved_at",
+      "resolver",
+      "reviewer_queue",
+      "risk_flag",
+      "risk_score",
+      "severity"
+    ]
+  }
+}

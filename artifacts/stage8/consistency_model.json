@@ -1,0 +1,45 @@
+{
+  "metrics": {
+    "loss": 1.425100564956665,
+    "district_accuracy": 0.8374999761581421,
+    "district_loss": 0.5200014114379883,
+    "implementing_agency_accuracy": 0.8727499842643738,
+    "implementing_agency_loss": 0.4335080087184906,
+    "numeric_loss": 0.09565906226634979,
+    "state_accuracy": 0.9742500185966492,
+    "state_loss": 0.12270215153694153,
+    "status_accuracy": 0.9182500243186951,
+    "status_loss": 0.25322961807250977
+  },
+  "baseline": {
+    "state_accuracy": 0.12775,
+    "district_accuracy": 0.068,
+    "implementing_agency_accuracy": 0.399,
+    "status_accuracy": 0.584,
+    "sanction_amount_mae": 0.07313624024391174,
+    "amount_spent_mae": 0.06230083480477333
+  },
+  "manifest": {
+    "framework": "tensorflow",
+    "seed": 20260906,
+    "n_total": 20000,
+    "n_train": 16000,
+    "n_holdout": 4000,
+    "epochs_max": 60,
+    "epochs_run": 50,
+    "batch_size": 256,
+    "early_stopped": true,
+    "n_parameters": 36615,
+    "_determinism": "Seeds are fixed for split, masking, initialisation and shuffling. TensorFlow is not bitwise deterministic on every kernel, so metrics may vary in the last decimal place across runs."
+  },
+  "ledger_eval": {
+    "status": "EVALUATED",
+    "roc_auc": 0.5378695759737108,
+    "precision_at_10pct": 0.9525,
+    "base_rate": 0.878,
+    "enrichment": 1.0848519362186788,
+    "n_holdout": 4000,
+    "n_defective": 3512,
+    "_claim": "Measures detection of INJECTED DATA-QUALITY DEFECTS on synthetic data. It is not a fraud metric, carries no implication for real-world fraud detection, and must never be reported as one."
+  }
+}

@@ -1,0 +1,119 @@
+# Stage 8 - Failure Log
+
+Every experiment attempted, including the ones that did not work. A failed
+experiment with a correct explanation is a result; a successful experiment on
+invalid labels is not.
+
+Generated 2026-09-06. 8 experiments logged.
+
+## EXP-001 Supervised calibration on CAG-derived labels
+
+**Classification:** `DATA_COVERAGE` | **Code bug:** no
+
+- **Objective** - Fit a probability calibration mapping risk_score to observed audit outcomes.
+- **Data** - Data/ SFAR 2020-21 (Nagaland) + PMGSY state-year tables from the PIB release.
+- **Attempted** - Extract findings, match to structured records, fit isotonic/Platt.
+- **What happened** - No join produced a single calibration-eligible pair.
+- **Measured** - audit years {2020-21}; structured years {2023-24,2024-25,2025-26,2026-27}; intersection = empty.
+- **Root cause** - The only audit report covers a financial year no structured dataset covers. Even with a year overlap the audit covers ONE state, so the joined universe would be a handful of state-year rows.
+- **Decision** - Do not fit. Stage 8 returns COVERAGE_FAILURE.
+- **What was NOT changed** - Matching was NOT weakened to force a join. Relaxing to STATE_ONLY would have produced rows, all at LEVEL_0 evidence, which is the defect that invalidated the previous dataset.
+- **Next action** - Acquire district- or work-level PMGSY data from OMMAS for FY2020-21 covering Nagaland.
+
+## EXP-002 Neural consistency model vs injected defects
+
+**Classification:** `MODEL_FAILURE` | **Code bug:** no
+
+- **Objective** - Show a self-supervised masked-field model identifies internally inconsistent records without fraud labels.
+- **Data** - data/synthetic_dataset.csv (20,000 rows) + generator defect ledger. Synthetic, diagnostic only.
+- **Attempted** - TensorFlow shared-encoder model, one head per field, masked-field reconstruction; per-record surprise scored against ledger rows.
+- **What happened** - Reconstruction trained well and beat every baseline by a wide margin, but surprise barely separated corrupted rows from clean ones.
+- **Measured** - Reconstruction: state .9743 (base .1278), district .8375 (base .0680), agency .8727 (base .3990), status .9183 (base .5840). Defect detection: ROC-AUC 0.538, enrichment 1.08x. Restricted to defects in modelled fields: AUC 0.592, enrichment 1.89x.
+- **Root cause** - Two causes, both mine. (1) The surprise score sums over CATEGORICAL heads only, so cost_outlier (numeric) and date_order (dates) are invisible to it by construction. (2) The ledger target is near-degenerate: 88.4% of rows carry some defect, dominated by missingness, and a missing categorical is encoded as a frequent token the model predicts easily - so the most common defect produces no surprise at all.
+- **Decision** - Do not adopt. The model is not a usable inconsistency detector as built.
+- **What was NOT changed** - The metric was NOT re-cut until it looked good. The restricted-target number is reported as a diagnostic of the stated hypothesis, beside the headline 0.538, not instead of it.
+- **Next action** - Score numeric and date heads into surprise; evaluate per defect channel rather than against 'any defect'.
+
+## EXP-003 Bid-rigging typology detection
+
+**Classification:** `DATA_COVERAGE` | **Code bug:** no
+
+- **Objective** - Detect bid rotation, cover bidding and single-bidder concentration.
+- **Data** - data/synthetic_dataset.csv; all Data/ structured files.
+- **Attempted** - Reachability check of 5 documented typologies against available columns.
+- **What happened** - 3 of 5 unreachable. No dataset anywhere carries a bid table.
+- **Measured** - Missing everywhere: tender_id, bid_amount, is_winner, n_bidders. Corpus columns are work-level only.
+- **Root cause** - PARAKH's schema has never represented a competition. The entire bid-rigging class of fraud is structurally invisible to it, independent of any model.
+- **Decision** - Typologies defined and registered; none evaluated.
+- **What was NOT changed** - No proxy for 'number of bidders' was invented from vendor counts.
+- **Next action** - Acquire tender-level bid data (CPPP / state e-procurement). This is the single highest-value acquisition for fraud detection, above more audit PDFs.
+
+## EXP-004 Statutory compliance rules
+
+**Classification:** `EXPECTED_REFUSAL` | **Code bug:** no
+
+- **Objective** - Replace judgement thresholds with cited statutory ones.
+- **Data** - Rule registry; no external data needed.
+- **Attempted** - Encode 5 GFR/CVC/CPWD rules with citations and evaluate.
+- **What happened** - All 5 implemented and tested; none may fire.
+- **Measured** - 0 of 5 citations verified against primary sources. All gated to PENDING_CITATION_VERIFICATION.
+- **Root cause** - Clause numbers were stated from working knowledge and could not be checked against the published documents in this environment.
+- **Decision** - Ship inert. An unverified citation carries the authority of law without the substance.
+- **What was NOT changed** - A cost-overrun rule was deliberately NOT added: no single overrun percentage is safely quotable across departments, and inventing one would fabricate a statutory number.
+- **Next action** - A domain reviewer confirms each clause and flips citation_verified. Each rule carries a verification_note naming exactly what to check.
+
+## EXP-005 Matcher blocking parity
+
+**Classification:** `CODE_BUG` | **Code bug:** yes
+
+- **Objective** - Replace O(n*m) matching with inverted-index blocking without changing results.
+- **Data** - Property-test fixtures.
+- **Attempted** - Blocked matcher, asserted identical to brute force across seeds and key regimes.
+- **What happened** - PASSED. Also surfaced a real bug in my own implementation.
+- **Measured** - 462x fewer comparisons (400,000 -> 866), 89x faster, byte-identical match set. 33 property tests pass.
+- **Root cause** - The minimum-name-length guard was being applied to work IDs, deleting the strongest evidence level. Caught by the key-ordering test, not by any output inspection.
+- **Decision** - Fixed: identifiers exempt from the name-length rule.
+- **What was NOT changed** - Two negative-control tests were corrected rather than the code - their fixtures left work_ids overlapping while claiming disjoint geography, so they contradicted their own premise.
+- **Next action** - None.
+
+## EXP-006 Kaggle encoder bench, first attempt
+
+**Classification:** `CODE_BUG` | **Code bug:** yes
+
+- **Objective** - Rank 10 open-weight multilingual encoders on cross-lingual synonymy before committing GPU time to training heads.
+- **Data** - No data - the probe embeds ~24 words and needs no corpus.
+- **Attempted** - Pushed a Kaggle kernel running --compare-encoders over MuRIL, MuRIL-large, IndicBERT, IndicBERTv2, XLM-R, XLM-R-large, mBERT, LaBSE, MiniLM and DistilUSE.
+- **What happened** - All 10 failed identically. Zero encoders loaded.
+- **Measured** - ImportError: cannot import name 'TFAutoModel' from 'transformers'. Ranking empty; bench reported NO ENCODER LOADED.
+- **Root cause** - HuggingFace removed TensorFlow support in transformers v5, so every TF* class is gone. The script was written against the TF API because the local box has TensorFlow and no torch - a local constraint that does not hold on Kaggle, where torch is preinstalled and is now the only supported path.
+- **Decision** - Moved embed_pretrained to PyTorch. The Keras prediction heads were left alone: they consume numpy arrays and have no reason to care which library produced them.
+- **What was NOT changed** - The bench was NOT made to swallow the error and continue with a partial ranking. Reporting a winner chosen from however many encoders happened to load would have looked like a result. It printed NO ENCODER LOADED instead, which is what let the cause be found in one read.
+- **Next action** - Version 3 pushed and running. Also added del model + empty_cache() between candidates: ten encoders at 100-500M parameters would otherwise exhaust GPU memory partway through, and that failure would present as a model problem rather than a cleanup bug.
+
+## EXP-007 Kaggle kernels, first push
+
+**Classification:** `CODE_BUG` | **Code bug:** yes
+
+- **Objective** - Run both training kernels on Kaggle.
+- **Data** - parakh-corpus dataset.
+- **Attempted** - Pushed two kernels immediately after updating the dataset.
+- **What happened** - Both errored in the first cell.
+- **Measured** - StopIteration from next(...) over glob('/kaggle/input/*'); the dataset version was still processing when the kernels started.
+- **Root cause** - A race, plus a brittle setup cell. The bare next() raised StopIteration with no message, so the log said nothing about what the kernel had actually seen under /kaggle/input.
+- **Decision** - Setup cell now searches recursively, prints the directory contents when it finds nothing, and exits with a message naming the likely cause. Re-pushed after confirming the dataset reported 'ready'.
+- **What was NOT changed** - No retry loop was added. Waiting for the dataset to be ready is the caller's job; a kernel that silently retries would hide a genuinely missing attachment.
+- **Next action** - Also renamed the long-run kernel id to match its title slug - the mismatch produced a 409 Conflict on push.
+
+## EXP-008 Long-run consistency training, 500k records
+
+**Classification:** `STATISTICAL_INSUFFICIENCY` | **Code bug:** no
+
+- **Objective** - Establish whether scale improves the consistency model's defect detection.
+- **Data** - 500,000 synthetic records, 75,000 holdout. Synthetic, diagnostic only.
+- **Attempted** - 100-epoch ceiling, 8h budget, early stopping, LR plateau decay, per-channel AUC every 10 epochs.
+- **What happened** - Converged at epoch 94. Defect AUC 0.53-0.58 and FLAT from epoch 10 onward. Used 10 minutes of an 8-hour budget.
+- **Measured** - cost_outlier 0.573 +/-0.011 (n=3,382); date_order 0.577 +/-0.012 (n=2,754); agency_mismatch 0.538 +/-0.013 (n=2,210); overspend 0.534 +/-0.013 (n=2,319).
+- **Root cause** - Two findings. (1) The signal ceiling is the DATA, not the compute - AUC was flat across 90 epochs, so neither longer training nor a bigger model will move it. (2) More seriously, this exposed a reporting error of mine: an earlier small run reported cost_outlier 0.699 from 171 positives, I published it in the status page and Kaggle plan as the target to beat, and its interval (+/-0.045) does not overlap the large-sample estimate. The 0.699 was unreliable.
+- **Decision** - Treat 0.53-0.58 as the real range - a weak ranking signal, not a decision input. Corrected both published documents.
+- **What was NOT changed** - The model was NOT retuned to chase the 0.699. That number was the artefact; the large-sample value is the measurement.
+- **Next action** - Report every AUC with its n and interval. The original brief demanded this (sec.44) and I violated it. No further compute on this model - a flat curve across 90 epochs says the data is the limit.

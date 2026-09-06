@@ -1,0 +1,250 @@
+{
+  "compliance": {
+    "n_rules": 5,
+    "n_citation_verified": 0,
+    "operational": false,
+    "_status": "INERT - no rule may emit a violation until its citation is verified against the primary source.",
+    "rules": [
+      {
+        "rule_id": "OPEN_TENDER_ABOVE_THRESHOLD",
+        "citation": "GFR 2017, Rule 155 (Advertised Tender Enquiry)",
+        "source": "General Financial Rules 2017, Government of India",
+        "source_url": "https://doe.gov.in/order-circular/general-financial-rules-2017",
+        "statement": "Procurement above the prescribed value must use open advertised tendering rather than a limited or single-source route.",
+        "required_fields": [
+          "sanctioned_amount",
+          "procurement_method"
+        ],
+        "threshold": 2500000.0,
+        "threshold_units": "INR",
+        "threshold_provenance": "STATUTORY",
+        "citation_verified": false,
+        "verification_note": "Confirm the clause number AND the current monetary threshold; the threshold has been revised by amendment more than once, so a correct clause with a stale figure is still wrong."
+      },
+      {
+        "rule_id": "LIMITED_TENDER_MIN_BIDDERS",
+        "citation": "GFR 2017, Rule 154 (Limited Tender Enquiry)",
+        "source": "General Financial Rules 2017, Government of India",
+        "source_url": "https://doe.gov.in/order-circular/general-financial-rules-2017",
+        "statement": "A limited tender enquiry must draw at least the prescribed minimum number of responsive bidders to constitute a competition.",
+        "required_fields": [
+          "procurement_method",
+          "n_bidders"
+        ],
+        "threshold": 3.0,
+        "threshold_units": "bidders",
+        "threshold_provenance": "STATUTORY",
+        "citation_verified": false,
+        "verification_note": "Confirm whether the minimum applies to bids invited or bids received - the two give different violation counts on the same data, and only one is the rule."
+      },
+      {
+        "rule_id": "UC_SUBMITTED_WITHIN_PERIOD",
+        "citation": "GFR 2017, Rule 230 (Utilisation Certificates)",
+        "source": "General Financial Rules 2017, Government of India",
+        "source_url": "https://doe.gov.in/order-circular/general-financial-rules-2017",
+        "statement": "A utilisation certificate is due within the prescribed period after the sanctioned work concludes.",
+        "required_fields": [
+          "date_completion",
+          "uc_submitted_date"
+        ],
+        "threshold": 365.0,
+        "threshold_units": "days",
+        "threshold_provenance": "STATUTORY",
+        "citation_verified": false,
+        "verification_note": "Confirm whether the period runs from completion, from the end of the financial year of the grant, or from date of release. The code assumes completion; the other two shift every result."
+      },
+      {
+        "rule_id": "SINGLE_SOURCE_JUSTIFICATION_RECORDED",
+        "citation": "CVC procurement guidance on single-tender/nomination awards",
+        "source": "Central Vigilance Commission procurement circulars",
+        "source_url": "https://www.cvc.gov.in/",
+        "statement": "An award made without competition must carry a justification recorded on the file.",
+        "required_fields": [
+          "procurement_method",
+          "single_source_justification"
+        ],
+        "threshold": null,
+        "threshold_units": "",
+        "threshold_provenance": "STATUTORY",
+        "citation_verified": false,
+        "verification_note": "Identify the specific circular and year. This is the weakest citation in the registry - CVC guidance is spread across many circulars and one must be named before this rule can fire."
+      },
+      {
+        "rule_id": "WORK_NOT_STARTED_BEFORE_APPROVAL",
+        "citation": "CPWD Works Manual - administrative approval precedes execution",
+        "source": "CPWD Works Manual",
+        "source_url": "https://cpwd.gov.in/",
+        "statement": "Execution of a work must not commence before administrative approval and expenditure sanction are in place.",
+        "required_fields": [
+          "date_approval",
+          "date_start"
+        ],
+        "threshold": null,
+        "threshold_units": "",
+        "threshold_provenance": "STATUTORY",
+        "citation_verified": false,
+        "verification_note": "Confirm the clause and the manual edition. Note that state PWD manuals govern state works and may differ from CPWD; a record's executing agency decides which manual applies to it."
+      }
+    ]
+  },
+  "typologies": {
+    "n_typologies": 5,
+    "n_source_verified": 0,
+    "_status": "INERT - every typology awaits source verification. The library defines what to look for and where the definition came from; it asserts nothing about any record yet.",
+    "typologies": [
+      {
+        "typology_id": "BID_ROTATION",
+        "name": "Bid rotation",
+        "subject": "VENDOR_PAIR",
+        "description": "A stable group of firms bids on the same tenders, taking turns to submit the lowest bid so each wins a share over time.",
+        "signature": "The same set of bidders recurs across tenders while the identity of the winner cycles, with each member's win rate close to 1/group size and losing bids clustered just above the winner.",
+        "required_fields": [
+          "tender_id",
+          "vendor_id",
+          "bid_amount",
+          "is_winner"
+        ],
+        "source": "OECD Guidelines for Fighting Bid Rigging in Public Procurement",
+        "source_url": "https://www.oecd.org/competition/bidrigging.htm",
+        "source_verified": false,
+        "verification_note": "Confirm the pattern definition and, more importantly, decide the recurrence and clustering thresholds from case evidence rather than by choosing round numbers - an unsourced threshold here reintroduces exactly the problem this layer avoids."
+      },
+      {
+        "typology_id": "COVER_BIDDING",
+        "name": "Cover or complementary bidding",
+        "subject": "TENDER",
+        "description": "Competitors submit deliberately uncompetitive bids so a pre-selected winner appears to have won a genuine competition.",
+        "signature": "Losing bids are implausibly far above the winner, or cluster at a near-constant margin, or are submitted by firms that never win anything in the same category.",
+        "required_fields": [
+          "tender_id",
+          "vendor_id",
+          "bid_amount",
+          "is_winner"
+        ],
+        "source": "OECD Guidelines for Fighting Bid Rigging in Public Procurement",
+        "source_url": "https://www.oecd.org/competition/bidrigging.htm",
+        "source_verified": false,
+        "verification_note": "Confirm whether the margin test is defined on absolute or relative spread; the two disagree on large-value tenders."
+      },
+      {
+        "typology_id": "SINGLE_BIDDER_CONCENTRATION",
+        "name": "Persistent single-bidder awards",
+        "subject": "VENDOR",
+        "description": "A firm repeatedly wins tenders that attracted no other responsive bid, in a market where competition would be expected.",
+        "signature": "A vendor's share of single-bid awards is far above the base rate for the same scheme, district and value band.",
+        "required_fields": [
+          "vendor_id",
+          "tender_id",
+          "n_bidders"
+        ],
+        "source": "World Bank Sanctions Board decisions; EU single-bidding indicators in public procurement",
+        "source_url": "https://www.worldbank.org/en/about/unit/sanctions-system",
+        "source_verified": false,
+        "verification_note": "Single bidding is a red flag, not proof - remote and specialised works legitimately attract one bidder. Confirm the peer base rate is computed within scheme and value band before use."
+      },
+      {
+        "typology_id": "DEBARRED_ENTITY_PARTICIPATION",
+        "name": "Award to a sanctioned entity",
+        "subject": "VENDOR",
+        "description": "A contract is awarded to a firm that appears on a debarment or blacklist at the time of award, or to a successor of one.",
+        "signature": "Vendor identity matches a published debarment list entry whose sanction period covers the award date.",
+        "required_fields": [
+          "vendor_id",
+          "vendor_name",
+          "date_approval"
+        ],
+        "source": "World Bank listing of debarred and cross-debarred firms; CVC and state PWD blacklists",
+        "source_url": "https://www.worldbank.org/en/projects-operations/procurement/debarred-firms",
+        "source_verified": false,
+        "verification_note": "This is the only typology here whose evidence is an adjudicated fact about a named entity rather than an inferred pattern, so it is the strongest - but matching must be on identity, not name similarity. A fuzzy name match against a debarment list is a defamation risk, not a finding."
+      },
+      {
+        "typology_id": "SPLIT_TO_AVOID_THRESHOLD",
+        "name": "Contract splitting",
+        "subject": "TENDER",
+        "description": "A work is divided into parts each falling just below a procurement threshold, avoiding open tendering.",
+        "signature": "Multiple awards to the same vendor, in the same district and short window, each just below a statutory threshold, whose sum exceeds it.",
+        "required_fields": [
+          "vendor_id",
+          "district",
+          "date_approval",
+          "sanctioned_amount"
+        ],
+        "source": "GFR procurement thresholds; CAG audit findings on splitting",
+        "source_url": "https://cag.gov.in/",
+        "source_verified": false,
+        "verification_note": "Depends on the same statutory threshold as the compliance registry's open-tender rule. Verify once and share the value - two copies of a legal threshold will drift apart."
+      }
+    ]
+  },
+  "typology_reachability": {
+    "n_typologies": 5,
+    "n_source_verified": 0,
+    "n_reachable": 2,
+    "typologies": {
+      "BID_ROTATION": {
+        "name": "Bid rotation",
+        "subject": "VENDOR_PAIR",
+        "status": "UNDETERMINABLE",
+        "detail": "data lacks tender_id, bid_amount, is_winner",
+        "missing_fields": [
+          "tender_id",
+          "bid_amount",
+          "is_winner"
+        ],
+        "source": "OECD Guidelines for Fighting Bid Rigging in Public Procurement",
+        "source_verified": false,
+        "detects_only_known": true
+      },
+      "COVER_BIDDING": {
+        "name": "Cover or complementary bidding",
+        "subject": "TENDER",
+        "status": "UNDETERMINABLE",
+        "detail": "data lacks tender_id, bid_amount, is_winner",
+        "missing_fields": [
+          "tender_id",
+          "bid_amount",
+          "is_winner"
+        ],
+        "source": "OECD Guidelines for Fighting Bid Rigging in Public Procurement",
+        "source_verified": false,
+        "detects_only_known": true
+      },
+      "SINGLE_BIDDER_CONCENTRATION": {
+        "name": "Persistent single-bidder awards",
+        "subject": "VENDOR",
+        "status": "UNDETERMINABLE",
+        "detail": "data lacks tender_id, n_bidders",
+        "missing_fields": [
+          "tender_id",
+          "n_bidders"
+        ],
+        "source": "World Bank Sanctions Board decisions; EU single-bidding indicators in public procurement",
+        "source_verified": false,
+        "detects_only_known": true
+      },
+      "DEBARRED_ENTITY_PARTICIPATION": {
+        "name": "Award to a sanctioned entity",
+        "subject": "VENDOR",
+        "status": "PENDING_SOURCE_VERIFICATION",
+        "detail": "fields present; source unverified: World Bank listing of debarred and cross-debarred firms; CVC and state PWD blacklists",
+        "missing_fields": [],
+        "source": "World Bank listing of debarred and cross-debarred firms; CVC and state PWD blacklists",
+        "source_verified": false,
+        "detects_only_known": true
+      },
+      "SPLIT_TO_AVOID_THRESHOLD": {
+        "name": "Contract splitting",
+        "subject": "TENDER",
+        "status": "PENDING_SOURCE_VERIFICATION",
+        "detail": "fields present; source unverified: GFR procurement thresholds; CAG audit findings on splitting",
+        "missing_fields": [],
+        "source": "GFR procurement thresholds; CAG audit findings on splitting",
+        "source_verified": false,
+        "detects_only_known": true
+      }
+    },
+    "_claim_limit": "A typology match means the record resembles a pattern proven in adjudicated cases. It is not a fraud finding. Because enforcement data records only CAUGHT fraud, recall against undetected schemes is unmeasurable, and no coverage claim may be made from these detectors.",
+    "_subject_warning": "VENDOR and VENDOR_PAIR typologies make statements about an entity, never about an individual work. Attributing an entity-level finding to one record would repeat the labelling error that invalidated the previous calibration dataset."
+  }
+}

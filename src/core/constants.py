@@ -1912,3 +1912,355 @@ CALIBRATION_REFUSAL_NOTE: Final[str] = (
     "the generator, not reality. calibrated_risk is None and the status says "
     "why. Supply real labelled outcomes to change this."
 )
+
+
+# ===========================================================================
+# STAGE 8 - EMPIRICAL VALIDATION LAYER
+#
+# The scaffold above answers "may we calibrate?". This block governs the
+# machinery that answers it with evidence: what data exists, how strongly a
+# finding was tied to a record, and which gates a claim must clear before the
+# word "probability" is used.
+#
+# Numbers here are safety floors, not targets. Clearing a floor means "not
+# obviously noise"; it does not mean "enough".
+# ===========================================================================
+
+STAGE8_PIPELINE_VERSION: Final[str] = "stage8.validation.v1"
+
+#: Where Stage 8 writes. Separate from RUNTIME_ARTIFACT_DIR so a validation
+#: run never overwrites the Stage 3 artefacts the pipeline reads back.
+STAGE8_ARTIFACT_DIR: Final[str] = "artifacts/stage8"
+
+# --- Evidence hierarchy ----------------------------------------------------
+#
+# How firmly an audit finding was tied to a record. This is the single most
+# important quantity in Stage 8: it decides whether a label is evidence or
+# coincidence. A district-level finding does NOT make every work in that
+# district a positive, and the only defence against that error is refusing to
+# let low levels into a fit.
+
+EVIDENCE_LEVELS: Final[tuple[str, ...]] = (
+    "LEVEL_0_GEOGRAPHIC_COINCIDENCE",
+    "LEVEL_1_DISTRICT_YEAR",
+    "LEVEL_2_ENTITY_SCHEME_YEAR",
+    "LEVEL_3_WORK_IDENTIFIED",
+)
+
+#: What each level means, kept as data so a reviewer can check the label
+#: schema without reading the matcher.
+EVIDENCE_LEVEL_MEANING: Final[Mapping[str, str]] = {
+        "LEVEL_0_GEOGRAPHIC_COINCIDENCE": (
+            "The record and the finding share a geography and nothing else. "
+            "This is not evidence about the record. Never calibrated on."
+        ),
+        "LEVEL_1_DISTRICT_YEAR": (
+            "A finding is known for this district and year, but not which "
+            "work it concerned. Diagnostic only: it constrains the district, "
+            "not the record."
+        ),
+        "LEVEL_2_ENTITY_SCHEME_YEAR": (
+            "A specific entity, scheme, district and year were identified. "
+            "Eligible for calibration, with the residual risk that several "
+            "works share that key."
+        ),
+        "LEVEL_3_WORK_IDENTIFIED": (
+            "The audit named the work, project or transaction. The only level "
+            "at which a label is a statement about this record."
+        ),
+    }
+
+#: Levels a fit may consume. LEVEL_1 and LEVEL_0 are excluded by rule: they
+#: describe an area, not a record, and admitting them is exactly the error
+#: that produced 5,237 postal-directory "positives" in the earlier build.
+CALIBRATION_ELIGIBLE_EVIDENCE: Final[tuple[str, ...]] = (
+    "LEVEL_2_ENTITY_SCHEME_YEAR",
+    "LEVEL_3_WORK_IDENTIFIED",
+)
+
+# --- Join strategy ---------------------------------------------------------
+#
+# Ordered strongest to weakest. The matcher stops at the first key that
+# resolves, and records which one - so a label always carries the strength of
+# the join that produced it. Confidences are the matcher's own assessment of
+# key specificity, not fitted quantities.
+
+MATCH_METHODS: Final[tuple[str, ...]] = (
+    "WORK_ID",
+    "TRANSACTION_ID",
+    "SCHEME_WORK_DISTRICT_YEAR",
+    "VENDOR_DISTRICT_YEAR",
+    "SCHEME_DISTRICT_YEAR",
+    "DISTRICT_YEAR",
+    "STATE_YEAR",
+    "STATE_ONLY",
+    "NO_MATCH",
+)
+
+MATCH_METHOD_CONFIDENCE: Final[Mapping[str, float]] = {
+        "WORK_ID": 0.99,
+        "TRANSACTION_ID": 0.99,
+        "SCHEME_WORK_DISTRICT_YEAR": 0.85,
+        "VENDOR_DISTRICT_YEAR": 0.60,
+        "SCHEME_DISTRICT_YEAR": 0.50,
+        "DISTRICT_YEAR": 0.35,
+        "STATE_YEAR": 0.15,
+        "STATE_ONLY": 0.05,
+        "NO_MATCH": 0.0,
+    }
+
+MATCH_METHOD_EVIDENCE: Final[Mapping[str, str]] = {
+        "WORK_ID": "LEVEL_3_WORK_IDENTIFIED",
+        "TRANSACTION_ID": "LEVEL_3_WORK_IDENTIFIED",
+        "SCHEME_WORK_DISTRICT_YEAR": "LEVEL_2_ENTITY_SCHEME_YEAR",
+        "VENDOR_DISTRICT_YEAR": "LEVEL_2_ENTITY_SCHEME_YEAR",
+        "SCHEME_DISTRICT_YEAR": "LEVEL_1_DISTRICT_YEAR",
+        "DISTRICT_YEAR": "LEVEL_1_DISTRICT_YEAR",
+        "STATE_YEAR": "LEVEL_0_GEOGRAPHIC_COINCIDENCE",
+        "STATE_ONLY": "LEVEL_0_GEOGRAPHIC_COINCIDENCE",
+        "NO_MATCH": "LEVEL_0_GEOGRAPHIC_COINCIDENCE",
+    }
+
+# --- Granularity -----------------------------------------------------------
+#
+# Named so that a state-year aggregate can never be silently described as a
+# work. Most public financial data is published at the coarse end; PARAKH
+# scores at the fine end; the gap between them is the reason calibration is
+# hard, and it must be visible in the inventory rather than discovered later.
+
+DATA_GRANULARITY: Final[tuple[str, ...]] = (
+    "TRANSACTION",
+    "WORK",
+    "SCHEME_DISTRICT_YEAR",
+    "DISTRICT_YEAR",
+    "SCHEME_YEAR",
+    "STATE_YEAR",
+    "NATIONAL_YEAR",
+    "UNKNOWN",
+)
+
+#: Granularity at or finer than which a record can carry a record-level label.
+#: Coarser data can still be used for context and drift, never for a label.
+LABELABLE_GRANULARITY: Final[tuple[str, ...]] = (
+    "TRANSACTION",
+    "WORK",
+    "SCHEME_DISTRICT_YEAR",
+)
+
+# --- Label semantics -------------------------------------------------------
+
+#: outcome is deliberately three-valued. NULL is not 0. "Never audited" and
+#: "audited and found clean" are different facts, and collapsing them
+#: manufactures negatives - the single most common way a fraud model is
+#: accidentally trained to predict audit coverage.
+LABEL_OUTCOMES: Final[Mapping[str, str]] = {
+        "1": "Audited and an issue was confirmed.",
+        "0": "Audited, within scope, and no issue was found.",
+        "NULL": "Not established. Never audited, or audit scope unknown.",
+    }
+
+#: The full evidence-aware label schema.
+STAGE8_LABEL_SCHEMA: Final[tuple[str, ...]] = (
+    "record_id",
+    "outcome",
+    "issue_type",
+    "severity",
+    "audit_source",
+    "audit_report",
+    "audit_page",
+    "audit_paragraph",
+    "audit_date",
+    "resolved_at",
+    "resolver",
+    "state",
+    "district",
+    "financial_year",
+    "scheme",
+    "work_id",
+    "match_method",
+    "match_confidence",
+    "evidence_level",
+    "audit_scope",
+    "provenance",
+)
+
+# --- Statistical floors ----------------------------------------------------
+#
+# Two tiers, because one number cannot serve both purposes. The floor is what
+# the software refuses to go below; the target is what a claim of production
+# readiness would actually require. Reporting a result between them is
+# allowed, but it must carry its uncertainty.
+
+STAGE8_MIN_LABELS_FLOOR: Final[int] = 200
+STAGE8_MIN_PER_CLASS_FLOOR: Final[int] = 30
+STAGE8_TARGET_PER_CLASS: Final[int] = 500
+
+#: Below this many labelled rows in a split, a metric computed on it is
+#: reported with its sample size and marked INSUFFICIENT_SAMPLE rather than
+#: presented as a measurement.
+STAGE8_MIN_SUBGROUP_N: Final[int] = 30
+
+#: Bootstrap resamples for confidence intervals. Enough to stabilise a
+#: percentile interval without dominating runtime.
+STAGE8_BOOTSTRAP_N: Final[int] = 1000
+STAGE8_CI_ALPHA: Final[float] = 0.05
+
+# --- Safety gates ----------------------------------------------------------
+
+#: Artifact invariance. If a model can reconstruct which FILE a record came
+#: from this well from its risk inputs, the score is tracking reporting
+#: practice rather than conduct. 0.75 AUC is well above chance (0.50) and
+#: leaves room for the genuine correlation between a source and its region.
+ARTIFACT_INVARIANCE_MAX_AUC: Final[float] = 0.75
+
+#: Columns that are targets or derived from targets. Using any as a feature is
+#: leakage by construction, so the check is a name check, not a statistic:
+#: a leak that has to be detected statistically has already been trained on.
+LEAKAGE_FORBIDDEN_FEATURES: Final[frozenset[str]] = frozenset(
+    {
+        "outcome",
+        "label",
+        "audit_severity",
+        "audit_outcome",
+        "issue_type",
+        "severity",
+        "investigation_result",
+        "resolved_at",
+        "resolver",
+        "audit_source",
+        "audit_report",
+        "audit_page",
+        "audit_paragraph",
+        "audit_date",
+        "audit_scope",
+        "evidence_level",
+        "match_method",
+        "match_confidence",
+        "decision_class",
+        "action_class",
+        "priority_level",
+        "reviewer_queue",
+        "risk_flag",
+        "risk_score",
+        "defect_type",
+        "injected_defect",
+        "ground_truth",
+    }
+)
+
+#: Minimum Spearman correlation between rankings under perturbation, and
+#: minimum overlap of the top-K set. A system whose top investigations move
+#: substantially when 10% of records are dropped is not giving an
+#: investigator a stable queue.
+STABILITY_MIN_RANK_CORRELATION: Final[float] = 0.90
+STABILITY_MIN_TOPK_OVERLAP: Final[float] = 0.80
+STABILITY_SUBSAMPLE_FRACTIONS: Final[tuple[float, ...]] = (0.8, 0.9, 1.0)
+STABILITY_SEEDS: Final[tuple[int, ...]] = (17, 101, 9973)
+
+#: Operational review depths, as fractions of the corpus. An investigator
+#: works a queue, so precision at the depth they can actually reach matters
+#: more than an average over records nobody will open.
+OPERATIONAL_REVIEW_DEPTHS: Final[tuple[float, ...]] = (0.01, 0.05, 0.10)
+
+#: Cost model for threshold selection. Explicit and configurable because the
+#: ratio is a policy choice, not a measurement: it says how many unnecessary
+#: reviews are worth one missed finding. Stated here so a reviewer can
+#: disagree with the number without reading the optimiser.
+COST_FALSE_NEGATIVE: Final[float] = 10.0
+COST_FALSE_POSITIVE: Final[float] = 1.0
+COST_PER_REVIEW: Final[float] = 0.1
+
+# --- Approval --------------------------------------------------------------
+
+STAGE8_APPROVAL_STATUSES: Final[tuple[str, ...]] = (
+    "CALIBRATED",
+    "PARTIALLY_CALIBRATED",
+    "INSUFFICIENT_LABELS",
+    "INSUFFICIENT_FEATURES",
+    "COVERAGE_FAILURE",
+    "LEAKAGE_DETECTED",
+    "DRIFT_DETECTED",
+    "SAFETY_FAILURE",
+    "MODEL_FAILURE",
+    "REJECTED",
+)
+
+#: The gates, in evaluation order. Ordered so the cheapest and most
+#: fundamental failures are found first: there is no point testing stability
+#: of a model that had no valid labels to train on.
+STAGE8_GATES: Final[tuple[str, ...]] = (
+    "G1_DATA_VALIDITY",
+    "G2_LABEL_VALIDITY",
+    "G3_FEATURE_AVAILABILITY",
+    "G4_COVERAGE",
+    "G5_LEAKAGE",
+    "G6_TEMPORAL_GENERALIZATION",
+    "G7_PROBABILITY_CALIBRATION",
+    "G8_ARTIFACT_INVARIANCE",
+    "G9_STABILITY",
+    "G10_OPERATIONAL_UTILITY",
+    "G11_EXPLAINABILITY",
+)
+
+#: Gates that must PASS before the word CALIBRATED may be used. A gate that
+#: could not run is not a pass.
+STAGE8_MANDATORY_GATES: Final[tuple[str, ...]] = STAGE8_GATES
+
+#: How a failure is classified. Separating an expected refusal from a software
+#: fault is the difference between a system that is working correctly and one
+#: that is broken, and the two must never share a category.
+FAILURE_CLASSES: Final[tuple[str, ...]] = (
+    "CODE_BUG",
+    "DATA_QUALITY",
+    "DATA_COVERAGE",
+    "LABEL_PROBLEM",
+    "LEAKAGE",
+    "STATISTICAL_INSUFFICIENCY",
+    "MODEL_FAILURE",
+    "DRIFT",
+    "PERFORMANCE_FAILURE",
+    "SAFETY_GATE_FAILURE",
+    "EXPECTED_REFUSAL",
+)
+
+#: Parameter governance states. A learned value never goes straight to
+#: production: it is a candidate until something independent has validated it.
+PARAMETER_STATES: Final[tuple[str, ...]] = (
+    "DEFAULT",
+    "CANDIDATE",
+    "VALIDATED",
+    "PRODUCTION",
+)
+
+STAGE8_PHASES: Final[tuple[str, ...]] = (
+    "PHASE_1_INVENTORY",
+    "PHASE_2_AUDIT_EXTRACTION",
+    "PHASE_3_MATCHING",
+    "PHASE_4_LABEL_GATES",
+    "PHASE_5_FEATURE_GATES",
+    "PHASE_6_SPLITS",
+    "PHASE_7_BASELINE_PIPELINE",
+    "PHASE_8_SIGNAL_EVALUATION",
+    "PHASE_9_AGGREGATION_EVALUATION",
+    "PHASE_10_SUPERVISED_BASELINES",
+    "PHASE_11_GRADIENT_BOOSTING",
+    "PHASE_12_PROBABILITY_CALIBRATION",
+    "PHASE_13_THRESHOLDS",
+    "PHASE_14_ARTIFACT_INVARIANCE",
+    "PHASE_15_LEAKAGE",
+    "PHASE_16_TEMPORAL",
+    "PHASE_17_SUBGROUP",
+    "PHASE_18_STABILITY_ABLATION",
+    "PHASE_19_OPERATIONAL",
+    "PHASE_20_NEURAL_EXPERIMENT",
+    "PHASE_21_APPROVAL",
+    "PHASE_22_REPORT",
+)
+
+PHASE_STATUSES: Final[tuple[str, ...]] = (
+    "PASS",
+    "FAIL",
+    "REFUSED",
+    "SKIPPED_UNSUPPORTED",
+    "DIAGNOSTIC_ONLY",
+)
