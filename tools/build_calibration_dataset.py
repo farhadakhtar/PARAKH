@@ -163,6 +163,14 @@ AUDIT_COLUMNS: Tuple[str, ...] = (
 
 UNKNOWN = "UNKNOWN"
 
+#: Source files whose records may never carry a label. These are PARAKH's own
+#: generated corpus: the works are fictional, so no real audit finding can
+#: confirm or clear one. Today none of them matches an audit geography, but
+#: that is luck - a future audit report naming Gujarat would label thousands
+#: of invented library buildings as "audit issue present". Excluded by rule,
+#: not left to coincidence.
+NEVER_LABEL_SOURCES = frozenset({"synthetic_dataset.csv"})
+
 
 # ===========================================================================
 # Helpers
@@ -626,6 +634,13 @@ def attach_weak_labels(
     labelled = records.copy()
     labelled["label"] = pd.NA
     labelled["confidence_label"] = pd.NA
+    labelled["label_blocked_reason"] = pd.NA
+
+    synthetic = labelled["source_file"].isin(NEVER_LABEL_SOURCES)
+    if synthetic.any():
+        labelled.loc[synthetic, "label_blocked_reason"] = (
+            "synthetic record; a real audit cannot confirm a fictional work"
+        )
     stats = {"high": 0, "medium": 0, "low": 0, "negative": 0, "unmatched": 0}
 
     if audits.empty or records.empty:
@@ -674,6 +689,16 @@ def attach_weak_labels(
     partial -= exact
     loose -= exact | partial
 
+    # Applied after matching rather than before, so the report can state how
+    # many labels the rule withheld instead of hiding the exclusion.
+    blocked = set(labelled.index[synthetic])
+    stats["blocked_synthetic"] = len(
+        (exact | partial | loose) & blocked
+    )
+    exact -= blocked
+    partial -= blocked
+    loose -= blocked
+
     for indices, tier in ((exact, "HIGH"), (partial, "MEDIUM"), (loose, "LOW")):
         if indices:
             selection = sorted(indices)
@@ -690,7 +715,7 @@ def attach_weak_labels(
         ],
         index=labelled.index,
     )
-    negatives = in_covered & ~positive
+    negatives = in_covered & ~positive & ~synthetic
     labelled.loc[negatives, "label"] = 0
     labelled.loc[negatives, "confidence_label"] = "MEDIUM"
     stats["negative"] = int(negatives.sum())
@@ -761,7 +786,59 @@ def build_report(
         "",
     ]
 
-    if labelled == 0:
+    # Usability is decided by three things the raw counts do not show: whether
+    # both classes are present, whether the labels landed on records that carry
+    # features, and whether those records are even the right kind of thing.
+    feature_bearing = 0
+    if labelled:
+        has_feature = final.loc[final["label"].notna(), ["budget_allocated", "expenditure"]]
+        feature_bearing = int(has_feature.notna().any(axis=1).sum())
+    single_class = labelled > 0 and (positives == 0 or negatives == 0)
+    label_sources = (
+        final.loc[final["label"].notna(), "source_file"].value_counts().to_dict()
+        if labelled
+        else {}
+    )
+
+    if labelled and (single_class or feature_bearing == 0):
+        lines += [
+            "**Targets met on paper. The dataset is NOT calibration-ready.**",
+            "",
+            f"{labelled:,} records carry a label, which clears the 200 "
+            "threshold. Three separate facts stop it being usable, and any one "
+            "of them alone would be enough:",
+            "",
+        ]
+        if single_class:
+            lines.append(
+                f"1. **One class only.** {positives:,} positive, {negatives:,} "
+                "negative. A calibration curve maps a score to an observed "
+                "rate; with nothing to contrast against there is no rate to "
+                "observe. This is not a small-sample problem - it is the "
+                "absence of the second axis."
+            )
+        if feature_bearing == 0:
+            lines.append(
+                f"2. **No features on the labelled rows.** 0 of {labelled:,} "
+                "carry a budget or expenditure figure, so there is no score to "
+                "calibrate against the label."
+            )
+        if label_sources:
+            top = max(label_sources, key=label_sources.get)
+            share = 100.0 * label_sources[top] / labelled
+            lines.append(
+                f"3. **The labels landed on the wrong kind of record.** "
+                f"{share:.1f}% of them are rows from `{top}`. A finding in a "
+                "CAG report does not make a row in that file an instance of "
+                "the irregularity - the two share a district, nothing more."
+            )
+        lines += [
+            "",
+            "The labels are retained rather than suppressed so the alignment "
+            "can be inspected, but nothing should be fitted on them.",
+            "",
+        ]
+    elif labelled == 0:
         lines += [
             "**This dataset is NOT calibration-ready, and cannot be made so from "
             "the files available.**",
@@ -789,6 +866,10 @@ def build_report(
         f"{'YES' if total >= 5000 else 'NO'} |",
         f"| labelled records | {labelled:,} | 200+ | "
         f"{'YES' if labelled >= 200 else 'NO'} |",
+        f"| labelled rows carrying a feature | {feature_bearing:,} | >0 | "
+        f"{'YES' if feature_bearing else 'NO'} |",
+        f"| labels withheld from synthetic records | "
+        f"{stats.get('blocked_synthetic', 0):,} | - | - |",
         f"| high-confidence labels | {high:,} ({pct(high)}) | - | - |",
         f"| duplicate record_id | {duplicate_ids:,} | - | - |",
         "",
@@ -842,6 +923,43 @@ def build_report(
             f"{row['reason']} |"
         )
 
+    # The verdict above says the labels are unusable; these three numbers say
+    # why, and they are the ones that decide what data would fix it.
+    audit_states = sorted(
+        {
+            str(value).strip()
+            for value in audits.get("state", pd.Series(dtype=object)).dropna()
+            if str(value).strip() and str(value).strip() != UNKNOWN
+        }
+    )
+    real_financial_rows = records[
+        (records["source_file"] != "synthetic_dataset.csv")
+        & (records["budget_allocated"].notna() | records["expenditure"].notna())
+    ]
+    real_financial = len(real_financial_rows)
+    record_states = sorted(
+        {
+            str(value).strip()
+            for value in real_financial_rows["state"].dropna()
+            if str(value).strip() and str(value).strip() != UNKNOWN
+        }
+    )
+    overlap = sorted(
+        {value.casefold() for value in audit_states}
+        & {value.casefold() for value in record_states}
+    )
+    audit_state_list = ", ".join(audit_states) or "no identified state"
+    record_state_list = ", ".join(record_states) or "no identified state"
+    overlap_text = ", ".join(overlap) if overlap else "empty"
+    audit_count = len(audits)
+    pdf_count = audits["source_pdf"].nunique() if len(audits) else 0
+
+    if label_sources:
+        lines += ["", "## Where the labels landed", "",
+                  "| source file | labelled rows |", "|---|---|"]
+        for name, count in sorted(label_sources.items(), key=lambda x: -x[1]):
+            lines.append(f"| `{name}` | {count:,} |")
+
     lines += ["", "## Processing notes", ""]
     lines += [f"- {note}" for note in notes] or ["- none"]
 
@@ -857,19 +975,54 @@ def build_report(
         "fabrication. The ledger's own note also states: *\"NEVER join this "
         "into the corpus before Stage 7 evaluation - it leaks labels.\"*",
         "",
-        "**No rows were invented to reach the 200-label target.** With zero "
-        "audit documents the honest count is zero.",
+        "**No rows were invented to reach the label target.** Every label "
+        "traces to a paragraph in a real audit PDF, listed in "
+        "`audit_labels.csv` by page.",
         "",
-        "## To make this dataset real",
+        "**Synthetic records were never labelled.** `synthetic_dataset.csv` "
+        "is excluded by rule rather than by coincidence: a real audit finding "
+        "cannot confirm or clear a fictional work.",
         "",
-        "Place genuine audit PDFs (CAG, PSU, SEAR) in `Data/` and re-run. The "
-        "parser in step 3 is implemented and functional - it extracts issue "
-        "type, severity, geography and rupee amounts, and handles crore/lakh "
-        "units. It has simply had nothing to read.",
+        "## Why the labels are unusable - the measurement",
         "",
-        "Even then, treat the output as **weak** labels: they are matched by "
-        "state, district and year, not by record. PARAKH's Stage 8 requires "
-        "`provenance='real'` and will refuse anything else.",
+        "The cause is coverage, not a parsing defect. Two disjoint sets:",
+        "",
+        f"- audit reports cover **{audit_state_list}**",
+        f"- the only real records carrying a budget or expenditure figure "
+        f"({real_financial:,} rows, from "
+        f"`ee03643a-...csv`) cover **{record_state_list}**",
+        "",
+        f"Intersection: **{overlap_text}**. No join on state can put a label "
+        "on a record that has a feature, so the matcher fell through to the "
+        "one remaining large file with district names - a postal directory. "
+        "It matched geography because that is all it was given to match on.",
+        "",
+        "The parser is working. It read "
+        f"{audit_count} observations across {pdf_count} report(s), with issue "
+        "type, severity, district and rupee amounts. The gap is on the "
+        "structured side.",
+        "",
+        "## What would actually close the gap",
+        "",
+        "Not more audit PDFs. Structured public-works financial data - "
+        "scheme, district, year, sanctioned amount, expenditure - for the "
+        "**same states the audit reports cover**"
+        f" ({audit_state_list}). MPLADS/MPLADS-style work registers, state "
+        "PWD expenditure statements, or scheme-wise district releases.",
+        "",
+        "Two further conditions must hold before anything is fitted:",
+        "",
+        "1. **Negatives must exist.** A district-year an audit examined and "
+        "did not fault is a negative. That requires knowing an audit's "
+        "*scope*, not only its findings - which paragraphs cover which units. "
+        "Without scope, absence of a finding is indistinguishable from "
+        "absence of an audit, and only NULL is honest.",
+        "2. **The match must be narrower than a district.** State + district + "
+        "year is a weak label: it says an irregularity occurred somewhere in "
+        "that district that year, not that this work is the irregularity.",
+        "",
+        "PARAKH's Stage 8 requires `provenance='real'` and refuses anything "
+        "else. On this dataset it should continue to refuse, and does.",
     ]
     return "\n".join(lines) + "\n"
 
