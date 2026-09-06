@@ -18,8 +18,11 @@ from src.stage10.vendor_entity import (
 from src.stage10.work_entity import (
     ENTITY_COLUMNS,
     EntityResolutionError,
+    EntityUsageError,
+    entity_status,
     entity_summary,
     name_similarity,
+    require_usable_groups,
     resolve_work_entities,
 )
 
@@ -27,11 +30,14 @@ __all__ = [
     "ENTITY_COLUMNS",
     "VENDOR_COLUMNS",
     "EntityResolutionError",
+    "EntityUsageError",
     "build_entity_graph",
+    "entity_status",
     "entity_summary",
     "graph_summary",
     "name_similarity",
     "normalise_vendor_name",
+    "require_usable_groups",
     "resolve_vendor_entities",
     "resolve_work_entities",
     "vendor_summary",

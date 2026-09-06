@@ -41,6 +41,9 @@ from src.stage10.vendor_entity import (
 )
 from src.stage10.work_entity import (
     EntityResolutionError,
+    EntityUsageError,
+    entity_status,
+    require_usable_groups,
     resolve_work_entities,
 )
 
@@ -598,3 +601,203 @@ class TestEntityGraph:
         vendors = resolve_vendor_entities(works)
 
         assert build_entity_graph(vendors) == build_entity_graph(vendors)
+
+
+# ===========================================================================
+# 10. GROUP USABILITY - the fail-closed guard
+# ===========================================================================
+
+
+class TestGroupUsability:
+    """``group_usable`` decides whether a group may be aggregated over.
+
+    The three disqualifiers overlap deliberately. A singleton is already LOW,
+    so rule 1 is subsumed by rule 3 - but stating each separately means a
+    later change to how confidence is assigned cannot silently re-admit
+    singletons.
+    """
+
+    def test_singleton_is_not_usable(self) -> None:
+        out = resolve_work_entities(frame(make_work(work_id="ALONE")))
+
+        assert not out["group_usable"].iloc[0]
+
+    def test_low_confidence_is_not_usable(self) -> None:
+        out = resolve_work_entities(
+            frame(*[make_work(work_id=f"W{i}", work_name=f"Unrelated {i}",
+                              sanction_amount=1e5 * (i + 1)) for i in range(4)])
+        )
+
+        assert (out.loc[out["entity_confidence"] == "LOW", "group_usable"] == False).all()
+
+    def test_conflicting_is_not_usable(self) -> None:
+        f = frame(
+            make_work(work_id="A", implementing_agency="PWD"),
+            make_work(work_id="B", implementing_agency="ZILLA PARISHAD"),
+        )
+
+        out = resolve_work_entities(f)
+        conflicting = out["entity_consistency"] == "CONFLICTING"
+        if conflicting.any():
+            assert not out.loc[conflicting, "group_usable"].any()
+
+    def test_usable_requires_all_three_conditions(self) -> None:
+        """Nothing marked usable may be degenerate, LOW or CONFLICTING."""
+        rng = np.random.default_rng(5)
+        records = [
+            make_work(
+                work_id=f"W{i:04d}",
+                scheme="PMGSY",
+                work_name=f"Construction of CC road at ward {i % 9}",
+                district=["PUNE", "NAGPUR"][i % 2],
+                sanction_amount=float(rng.choice([1e6, 1.03e6, 4e6])),
+            )
+            for i in range(80)
+        ]
+
+        out = resolve_work_entities(frame(*records))
+        usable = out[out["group_usable"]]
+
+        assert not usable["degenerate_group"].any()
+        assert usable["entity_confidence"].ne("LOW").all()
+        assert usable["entity_consistency"].ne("CONFLICTING").all()
+
+
+class TestAggregationGuard:
+    """The guard that makes EXP-009 structurally impossible.
+
+    EXP-009 was survivable because a degenerate group *returned a number*
+    rather than raising. Visibility was not enough - the number looked like
+    every other number. This converts the failure into an exception at the
+    point of use.
+    """
+
+    def test_guard_raises_on_unusable_groups(self) -> None:
+        out = resolve_work_entities(frame(make_work(work_id="ALONE")))
+
+        with pytest.raises(EntityUsageError, match="degenerate|usable"):
+            require_usable_groups(out)
+
+    def test_guard_passes_when_all_usable(self) -> None:
+        f = frame(
+            make_work(work_id="A", scheme="PMGSY"),
+            make_work(work_id="B", scheme="PMGSY"),
+        )
+        out = resolve_work_entities(f)
+
+        require_usable_groups(out)  # must not raise
+
+    def test_guard_names_the_offending_entities(self) -> None:
+        """The error must say which groups, not merely that some exist."""
+        f = frame(
+            make_work(work_id="A", scheme="PMGSY"),
+            make_work(work_id="B", scheme="PMGSY"),
+            make_work(work_id="C", scheme="PMGSY", work_name="Unrelated supply",
+                      sanction_amount=9e5),
+        )
+        out = resolve_work_entities(f)
+
+        with pytest.raises(EntityUsageError) as excinfo:
+            require_usable_groups(out)
+        assert "WE-" in str(excinfo.value)
+
+    def test_guard_can_filter_instead_of_raising(self) -> None:
+        """A caller that wants only the usable rows may ask for them.
+
+        Filtering is offered as an explicit alternative to raising, because
+        the honest options are "refuse" or "aggregate over the defensible
+        subset" - never "aggregate over everything and hope".
+        """
+        f = frame(
+            make_work(work_id="A", scheme="PMGSY"),
+            make_work(work_id="B", scheme="PMGSY"),
+            make_work(work_id="C", scheme="PMGSY", work_name="Unrelated supply",
+                      sanction_amount=9e5),
+        )
+        out = resolve_work_entities(f)
+
+        kept = require_usable_groups(out, on_unusable="filter")
+
+        assert len(kept) < len(out)
+        assert kept["group_usable"].all()
+
+    def test_empty_after_filter_is_still_an_error(self) -> None:
+        """Filtering to nothing is not a successful aggregation."""
+        out = resolve_work_entities(frame(make_work(work_id="ALONE")))
+
+        with pytest.raises(EntityUsageError, match="no usable"):
+            require_usable_groups(out, on_unusable="filter")
+
+
+class TestEntityStatus:
+    """A systemic ceiling must be reported as a status, not a footnote."""
+
+    def test_no_high_confidence_emits_unreachable(self) -> None:
+        """Zero HIGH groups across a whole corpus is a finding.
+
+        On this corpus it happens because ``scheme`` is absent, so a core
+        field cannot be verified. Reporting it as a status means nobody has to
+        notice the absence of a value in a distribution.
+        """
+        f = frame(make_work(work_id="A"), make_work(work_id="B"))
+
+        out = resolve_work_entities(f)
+        status = entity_status(out)
+
+        assert status["status"] == "HIGH_CONFIDENCE_UNREACHABLE"
+        assert status["n_high"] == 0
+        assert "scheme" in status["reason"].lower()
+
+    def test_high_present_reports_ok(self) -> None:
+        f = frame(
+            make_work(work_id="A", scheme="PMGSY"),
+            make_work(work_id="B", scheme="PMGSY"),
+        )
+
+        status = entity_status(resolve_work_entities(f))
+
+        assert status["status"] == "OK"
+        assert status["n_high"] > 0
+
+    def test_status_reports_usable_share(self) -> None:
+        out = resolve_work_entities(
+            frame(*[make_work(work_id=f"W{i}", work_name=f"Thing {i}",
+                              sanction_amount=1e5 * (i + 1)) for i in range(5)])
+        )
+
+        status = entity_status(out)
+
+        assert status["usable_share"] == 0.0
+        assert status["n_records"] == 5
+
+
+class TestNonDestructiveGuarantee:
+    """Rule 8: decisions, risk and routing are never touched."""
+
+    def test_decision_columns_are_untouched(self) -> None:
+        f = frame(make_work(work_id="A"), make_work(work_id="B"))
+        f["risk_score"] = [0.8, 0.2]
+        f["action_class"] = ["ESCALATE_IMMEDIATE", "MONITOR"]
+        f["priority_level"] = ["P0", "P3"]
+        before = f.copy()
+
+        out = resolve_work_entities(f)
+
+        for column in ("risk_score", "action_class", "priority_level"):
+            pd.testing.assert_series_equal(
+                out[column], before[column], check_names=False
+            )
+
+    def test_unusable_groups_do_not_suppress_escalation(self) -> None:
+        """An unusable group must not quietly downgrade a decision.
+
+        If it did, worse entity resolution would mean quieter enforcement -
+        the system would get safer-looking exactly as it got less reliable.
+        """
+        f = frame(make_work(work_id="ALONE"))
+        f["action_class"] = ["ESCALATE_IMMEDIATE"]
+
+        out = resolve_work_entities(f)
+
+        assert not out["group_usable"].iloc[0]
+        assert out["action_class"].iloc[0] == "ESCALATE_IMMEDIATE"

@@ -79,6 +79,23 @@ class EntityResolutionError(ValueError):
     """
 
 
+class EntityUsageError(RuntimeError):
+    """A group-level computation was attempted over an unusable group.
+
+    Distinct from :class:`EntityResolutionError`, which means the resolver
+    itself produced something invalid. This means the resolver worked and a
+    *caller* tried to aggregate over groups the resolver has declared it does
+    not stand behind.
+
+    Raised rather than warned because that is the whole point. EXP-009 was
+    survivable precisely because a degenerate group returned a number instead
+    of failing: the number looked exactly like every other number, a model
+    scored 0.52 on it, and nothing surfaced. Marking such groups was not
+    enough - a mark can be ignored by any code that does not check for it. An
+    exception cannot.
+    """
+
+
 #: Columns attached to every record. Additive - nothing is overwritten.
 ENTITY_COLUMNS: Tuple[str, ...] = (
     "work_entity_id",
@@ -87,6 +104,7 @@ ENTITY_COLUMNS: Tuple[str, ...] = (
     "group_size",
     "group_evidence",
     "degenerate_group",
+    "group_usable",
     "work_id_reused",
     "fiscal_year_derived",
 )
@@ -411,6 +429,16 @@ def resolve_work_entities(frame: pd.DataFrame) -> pd.DataFrame:
     out["group_evidence"] = out["work_entity_id"].map(evidence)
     out["degenerate_group"] = out["group_size"] == 1
 
+    # A group may be aggregated over only when all three disqualifiers are
+    # absent. The conditions overlap - every singleton is already LOW - and
+    # they are kept separate anyway, so that a later change to how confidence
+    # is assigned cannot silently re-admit singletons through the back door.
+    out["group_usable"] = (
+        (~out["degenerate_group"])
+        & out["entity_confidence"].ne("LOW")
+        & out["entity_consistency"].ne("CONFLICTING")
+    )
+
     if "work_id" in out.columns:
         counts = out["work_id"].value_counts()
         out["work_id_reused"] = out["work_id"].map(counts).gt(1).fillna(False)
@@ -463,6 +491,16 @@ def _assert_invariants(
     if out.loc[degenerate, "entity_confidence"].ne("LOW").any():
         raise EntityResolutionError("a degenerate group claims above LOW confidence")
 
+    # The usability invariant, checked rather than trusted: nothing marked
+    # usable may carry any of the three disqualifiers.
+    usable = out["group_usable"].fillna(False).astype(bool)
+    if out.loc[usable, "degenerate_group"].any():
+        raise EntityResolutionError("a degenerate group was marked usable")
+    if out.loc[usable, "entity_confidence"].eq("LOW").any():
+        raise EntityResolutionError("a LOW-confidence group was marked usable")
+    if out.loc[usable, "entity_consistency"].eq("CONFLICTING").any():
+        raise EntityResolutionError("a CONFLICTING group was marked usable")
+
     # The transitivity guard: a HIGH group must survive inspection of the
     # whole group, not merely of the pairs that assembled it.
     high = out[out["entity_confidence"] == "HIGH"]
@@ -505,4 +543,136 @@ def entity_summary(out: pd.DataFrame) -> Dict[str, Any]:
             "computed over groups of one look identical to statistics over "
             "real groups. Read this before trusting any group-level metric."
         ),
+    }
+
+
+def require_usable_groups(
+    frame: pd.DataFrame, *, on_unusable: str = "raise"
+) -> pd.DataFrame:
+    """Gate any group-level computation on entity usability.
+
+    Call this immediately before aggregating over ``work_entity_id``. It is
+    the mechanism that turns EXP-009 from a silent wrong answer into a loud
+    failure: a degenerate group can no longer contribute a number to a mean,
+    a correlation or a screen without someone having decided to let it.
+
+    Args:
+        frame: Stage 10 output carrying ``group_usable``.
+        on_unusable: ``"raise"`` (default) to refuse the whole computation, or
+            ``"filter"`` to return only the defensible rows. Those are the two
+            honest options; aggregating over everything and hoping is not one
+            of them, which is why there is no third mode.
+
+    Returns:
+        The usable rows. With ``on_unusable="raise"`` that is the whole frame,
+        because anything else has already raised.
+
+    Raises:
+        EntityUsageError: If unusable groups are present and ``on_unusable``
+            is ``"raise"``, or if filtering leaves nothing behind.
+        KeyError: If the frame did not come from Stage 10.
+    """
+    if "group_usable" not in frame.columns:
+        raise KeyError(
+            "require_usable_groups needs a 'group_usable' column; pass the "
+            "output of resolve_work_entities, not the raw corpus"
+        )
+    if on_unusable not in {"raise", "filter"}:
+        raise ValueError(
+            f"on_unusable must be 'raise' or 'filter', got {on_unusable!r}"
+        )
+
+    usable = frame["group_usable"].fillna(False).astype(bool)
+    if usable.all():
+        return frame
+
+    bad = frame.loc[~usable]
+    reasons = []
+    if "degenerate_group" in bad.columns and bad["degenerate_group"].any():
+        reasons.append(f"{int(bad['degenerate_group'].sum())} degenerate")
+    if "entity_confidence" in bad.columns:
+        n_low = int(bad["entity_confidence"].eq("LOW").sum())
+        if n_low:
+            reasons.append(f"{n_low} LOW confidence")
+    if "entity_consistency" in bad.columns:
+        n_conf = int(bad["entity_consistency"].eq("CONFLICTING").sum())
+        if n_conf:
+            reasons.append(f"{n_conf} CONFLICTING")
+
+    sample = sorted(bad["work_entity_id"].astype(str).unique())[:5]
+    detail = (
+        f"{int((~usable).sum())} of {len(frame)} record(s) sit in unusable "
+        f"groups ({'; '.join(reasons)}). Examples: {', '.join(sample)}"
+    )
+
+    if on_unusable == "raise":
+        raise EntityUsageError(
+            detail
+            + ". Aggregating over these would repeat EXP-009, where a group "
+            "of one produced a number indistinguishable from a real one. "
+            "Pass on_unusable='filter' to aggregate over the defensible "
+            "subset instead, and report how much was dropped."
+        )
+
+    kept = frame.loc[usable]
+    if kept.empty:
+        raise EntityUsageError(
+            "no usable groups remain after filtering; there is nothing to "
+            f"aggregate over. {detail}"
+        )
+    LOGGER.warning(
+        "Stage 10 guard: dropped %d of %d record(s) as unusable (%s)",
+        int((~usable).sum()),
+        len(frame),
+        "; ".join(reasons),
+    )
+    return kept
+
+
+def entity_status(frame: pd.DataFrame) -> Dict[str, Any]:
+    """Corpus-level entity health, including the ceilings.
+
+    ``HIGH_CONFIDENCE_UNREACHABLE`` is emitted when no group anywhere reached
+    HIGH. That is a systemic fact - usually a missing core field - rather than
+    a property of any record, and stating it as a status means nobody has to
+    notice the absence of a value in a distribution.
+    """
+    if frame.empty:
+        return {"status": "EMPTY", "n_records": 0, "n_high": 0,
+                "usable_share": 0.0}
+
+    n_high = int(frame["entity_confidence"].eq("HIGH").sum())
+    usable_share = float(frame["group_usable"].fillna(False).mean())
+    scheme_available = bool(frame.attrs.get("scheme_available", True))
+
+    if n_high == 0:
+        status = "HIGH_CONFIDENCE_UNREACHABLE"
+        reason = (
+            "No group reached HIGH confidence. The 'scheme' column is absent, "
+            "so a core field cannot be verified and HIGH is unreachable by "
+            "construction - not a property of these records."
+            if not scheme_available
+            else "No group reached HIGH confidence, though every core field "
+            "was available to check."
+        )
+    elif usable_share == 0.0:
+        status = "NO_USABLE_GROUPS"
+        reason = "Groups exist but none is defensible for aggregation."
+    else:
+        status = "OK"
+        reason = f"{usable_share:.1%} of records sit in usable groups."
+
+    return {
+        "status": status,
+        "reason": reason,
+        "n_records": int(len(frame)),
+        "n_entities": int(frame["work_entity_id"].nunique()),
+        "n_high": n_high,
+        "n_usable_records": int(frame["group_usable"].fillna(False).sum()),
+        "usable_share": usable_share,
+        "degenerate_share": float(frame["degenerate_group"].mean()),
+        "conflicting_share": float(
+            frame["entity_consistency"].eq("CONFLICTING").mean()
+        ),
+        "scheme_available": scheme_available,
     }
