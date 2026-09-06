@@ -46,6 +46,7 @@ from src.core.constants import (
     S3_PRESERVE_ESCALATIONS,
     S3_REASON,
     S4_REASON,
+    ENTITY_RESOLUTION_FLAG,
     SAFETY_DECISIONS,
     SAFETY_RULES,
     STAGE65_SAFETY_LOG,
@@ -336,3 +337,60 @@ def _assert_guarantees(
         frame.loc[untouched, "final_decision"]
         == frame.loc[untouched, "original_decision"]
     ).all(), "a record changed without being marked as intervened"
+
+
+def annotate_entity_resolution(
+    frame: pd.DataFrame, entities: Optional[pd.DataFrame] = None
+) -> pd.Series:
+    """Stage 6.5 - flag records whose entity grouping contradicts itself.
+
+    **Purely additive.** This raises a flag and nothing else. It never removes
+    an escalation, never lowers a priority, never overrides a decision. A
+    record whose entity is CONFLICTING is a record whose *grouping* is in
+    doubt, which is a reason to look at the grouping - not a reason to trust
+    the decision less or more.
+
+    The distinction matters because the obvious alternative is wrong: if a
+    conflicting entity suppressed an escalation, then bad entity resolution
+    would silently reduce enforcement, and the worse the grouping got the
+    quieter the system would become.
+
+    Args:
+        frame: Corpus frame carrying Stage 6 output.
+        entities: Stage 10 output aligned to ``frame.index``. When None, the
+            flag is False everywhere - Stage 10 is optional and every
+            downstream stage must run without it.
+
+    Returns:
+        A boolean Series aligned to ``frame.index``, True where the record's
+        entity group is CONFLICTING or degenerate.
+    """
+    flag = pd.Series(False, index=frame.index, name=ENTITY_RESOLUTION_FLAG)
+    if entities is None or "entity_consistency" not in entities.columns:
+        return flag
+
+    if not entities.index.equals(frame.index):
+        raise SafetyConfigError(
+            "entity annotations are not aligned to the frame; aligning them "
+            "by position would attach one record's grouping to another"
+        )
+
+    conflicting = entities["entity_consistency"].eq("CONFLICTING")
+    degenerate = entities.get(
+        "degenerate_group", pd.Series(False, index=frame.index)
+    ).fillna(False).astype(bool)
+
+    # Degenerate groups are included deliberately. A group of one is not a
+    # contradiction, but it is equally a grouping nobody has confirmed, and
+    # EXP-009 showed that unmarked singletons pass through every downstream
+    # statistic looking exactly like real groups.
+    flag = (conflicting | degenerate).rename(ENTITY_RESOLUTION_FLAG)
+    LOGGER.info(
+        "Stage 6.5 entity flags: %d conflicting, %d degenerate, %d flagged "
+        "of %d record(s) - additive only, no decision changed",
+        int(conflicting.sum()),
+        int(degenerate.sum()),
+        int(flag.sum()),
+        len(frame),
+    )
+    return flag

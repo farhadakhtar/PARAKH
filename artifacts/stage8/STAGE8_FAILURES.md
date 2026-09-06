@@ -4,7 +4,7 @@ Every experiment attempted, including the ones that did not work. A failed
 experiment with a correct explanation is a result; a successful experiment on
 invalid labels is not.
 
-Generated 2026-09-06. 8 experiments logged.
+Generated 2026-09-06. 10 experiments logged.
 
 ## EXP-001 Supervised calibration on CAG-derived labels
 
@@ -117,3 +117,31 @@ Generated 2026-09-06. 8 experiments logged.
 - **Decision** - Treat 0.53-0.58 as the real range - a weak ranking signal, not a decision input. Corrected both published documents.
 - **What was NOT changed** - The model was NOT retuned to chase the 0.699. That number was the artefact; the large-sample value is the measurement.
 - **Next action** - Report every AUC with its n and interval. The original brief demanded this (sec.44) and I violated it. No further compute on this model - a flat curve across 90 epochs says the data is the limit.
+
+## EXP-009 Cartel screens on a broken tender reconstruction
+
+**Classification:** `CODE_BUG` | **Code bug:** yes
+
+- **Objective** - Train bid-rigging screens on 73 prosecuted EU cartels and measure whether they detect collusion.
+- **Data** - Zenodo 17595875, CC-BY-NC. 3,861,477 bid rows, 18,807 labelled (8,045 cartel / 10,762 clean), 73 cartels, 7 countries, 2000-2022.
+- **Attempted** - Computed the standard screens - CV, SPD, RD, DIFFP, kurtosis, skew - per tender, then trained logistic / gradient boosting / MLP with GroupKFold on cartel_id.
+- **What happened** - Ran clean and produced a plausible-looking 0.52 ROC-AUC. The features were measuring nothing.
+- **Measured** - Grouped CV before the fix: logistic 0.519, gradient boosting 0.523, MLP 0.533. After the fix: 0.520 / 0.581 / 0.566. Gradient boosting moved +0.058 against a CI half-width of 0.008.
+- **Root cause** - The source has NO tender identifier, so I reconstructed one - and keyed it over the LABELLED SUBSET ONLY. Measured after the fact: median group size 1, and 8-11% agreement with lot_bidscount against a true median of 4 bids per lot. Every within-tender screen was computed on a single bid: no spread, no runner-up, no kurtosis. The labelled 18,807 rows are a SAMPLE of bids; the sibling bids of each tender live among the 3.84M unlabelled rows.
+- **Decision** - Screens are now computed on the FULL frame and joined onto the labelled subset. Key is buyer + first-call-date + CPV4, which gives median 8 bids per group and puts 79% of labelled rows in a tender with >= 2 bids.
+- **What was NOT changed** - The reconstruction was NOT presented as solved. It matches lot_bidscount exactly only ~21% of the time, so every within-tender screen remains approximate, and the script and the notebook both say so.
+- **Next action** - Nothing detects this class of bug from the output - a degenerate group produces a number, not an error. The check that caught it (group size versus a published bid count) should run on every future reconstructed key.
+
+## EXP-010 Cross-jurisdiction transfer of cartel screens
+
+**Classification:** `PERFORMANCE_FAILURE` | **Code bug:** no
+
+- **Objective** - Measure whether a screen trained on some jurisdictions works on one it has never seen - the closest available proxy for whether any of this transfers to India.
+- **Data** - Same labelled set; leave-one-country-out over 7 countries.
+- **Attempted** - Train on six countries, test on the seventh, all three model families, repeated for each country.
+- **What happened** - Transfer is unreliable. Performance ranges from below chance to moderately useful with no stable pattern.
+- **Measured** - Best model per held-out country: BG 0.73, LV 0.74, SE 0.63, HU 0.63, PT 0.58, FR 0.57, ES 0.51. ES is the largest holdout (7,860 rows) and is the worst. Pooled grouped CV was 0.581.
+- **Root cause** - Not a defect. Procurement regimes differ in thresholds, publication rules and market structure, so a screen's calibration is jurisdiction-specific even when its mechanism is not. Published Swiss results report much higher figures, but typically within one country and often without cartel-grouped splits.
+- **Decision** - Report leave-one-country-out beside the pooled number, never instead of it. Treat the pooled figure as optimistic.
+- **What was NOT changed** - No country was dropped to improve the average, and no threshold was tuned per country. Removing ES would have raised the mean by roughly 0.05 and destroyed the finding.
+- **Next action** - This quantifies the India transfer risk instead of assuming it. Any screen deployed in India needs its thresholds refitted on Indian data; the method may transfer, the calibration does not.

@@ -2264,3 +2264,134 @@ PHASE_STATUSES: Final[tuple[str, ...]] = (
     "SKIPPED_UNSUPPORTED",
     "DIAGNOSTIC_ONLY",
 )
+
+
+# ===========================================================================
+# STAGE 10 - ENTITY / NETWORK INTELLIGENCE
+#
+# A correction layer, not a model. Until now a "group" in PARAKH was not
+# guaranteed to correspond to anything real:
+#
+#   R5      100 work_id values are reused across 200 rows, so keying on the
+#           id merges unrelated works.
+#   EXP-009 a reconstructed join key produced groups of median size ONE.
+#           Every within-group statistic was computed on a single record and
+#           the output looked entirely normal.
+#
+# The governing rule is that this layer may improve grouping but may never
+# invent truth. A weak match leaves records apart; ambiguity is reported
+# rather than resolved; nothing is overwritten.
+# ===========================================================================
+
+STAGE10_VERSION: Final[str] = "stage10.entity.v1"
+
+#: How much of a claim a grouping makes about itself.
+ENTITY_CONFIDENCE_LEVELS: Final[tuple[str, ...]] = ("HIGH", "MEDIUM", "LOW")
+
+#: Whether the members of a group agree with each other. Separate from
+#: confidence because they answer different questions: confidence is "how
+#: sure are we these belong together", consistency is "given that they are
+#: together, do they contradict each other".
+ENTITY_CONSISTENCY_STATES: Final[tuple[str, ...]] = (
+    "CONSISTENT",
+    "CONFLICTING",
+    "AMBIGUOUS",
+)
+
+# --- blocking -------------------------------------------------------------
+#
+# Fields that must match EXACTLY before two records are even compared. These
+# are not similarity inputs - they are hard partitions. Two identically named
+# works in different districts are different works, and no amount of name
+# similarity may override that.
+#
+# ``scheme`` is listed but ABSENT from the current corpus. It is treated as
+# optional: when missing, a core field cannot be verified, so HIGH confidence
+# becomes unreachable and groups cap at MEDIUM. That is the honest handling -
+# the alternative is to quietly drop the requirement and keep claiming HIGH.
+
+ENTITY_BLOCKING_FIELDS: Final[tuple[str, ...]] = (
+    "district",
+    "scheme",
+    "fiscal_year",
+)
+
+#: Corpus columns that stand in for the names the design uses. The original
+#: column is never renamed; this only tells the resolver where to look.
+ENTITY_FIELD_ALIASES: Final[Mapping[str, tuple[str, ...]]] = {
+    "estimated_cost": ("sanction_amount", "estimated_cost", "budget_allocated"),
+    "scheme": ("scheme", "scheme_name"),
+    "agency": ("implementing_agency", "agency", "executing_agency"),
+    "vendor": ("vendor_name", "vendor", "contractor_name"),
+}
+
+#: Derived from ``date_approval``. Indian financial year runs April-March, so
+#: an approval in March 2021 belongs to FY2020-21 and one in April 2021 does
+#: not. Recorded as derived rather than treated as source data.
+FISCAL_YEAR_START_MONTH: Final[int] = 4
+
+# --- similarity thresholds ------------------------------------------------
+#
+# Deterministic and stated, not fitted. There are no labelled entity pairs to
+# fit against, so every number here is a judgement - and it is a judgement
+# about how much evidence justifies a merge, which is the only kind of
+# threshold this layer is entitled to carry.
+
+#: Name similarity at or above this is treated as the same work, given the
+#: blocking key already holds. Token-set overlap combined with a sequence
+#: ratio; both are deterministic and neither is learned.
+WORK_NAME_STRONG_SIMILARITY: Final[float] = 0.85
+
+#: Below this, two names are unrelated and no merge occurs regardless of any
+#: other agreement.
+WORK_NAME_WEAK_SIMILARITY: Final[float] = 0.62
+
+#: Cost proximity for a merge. Two records of the same work may differ by
+#: revision or rounding, not by a factor.
+WORK_COST_TOLERANCE: Final[float] = 0.10
+
+#: Spread within an assembled group above which the group is CONFLICTING.
+#: Deliberately looser than the merge tolerance: transitive chaining can
+#: legitimately assemble a group wider than any single pair, and the point of
+#: this constant is to catch the case where that has gone too far.
+WORK_COST_CONFLICT_TOLERANCE: Final[float] = 0.30
+
+#: Days apart before two records' timelines are treated as inconsistent.
+WORK_TIMELINE_CONFLICT_DAYS: Final[int] = 365
+
+# --- vendor ---------------------------------------------------------------
+
+#: Legal-form suffixes stripped before comparison. A company is the same
+#: company whether it is written "Ltd", "Limited" or "Pvt. Ltd.".
+VENDOR_LEGAL_SUFFIXES: Final[tuple[str, ...]] = (
+    "private limited", "pvt limited", "pvt ltd", "private ltd",
+    "limited", "ltd", "llp", "llc", "inc", "incorporated",
+    "corporation", "corp", "company", "co", "and company", "and co",
+    "enterprises", "enterprise", "firm", "sons", "and sons",
+)
+
+#: Honorifics and trade prefixes that carry no identity. "M/s" precedes
+#: almost every Indian firm name on an invoice.
+VENDOR_NAME_PREFIXES: Final[tuple[str, ...]] = ("m/s", "ms", "messrs", "shri", "sri")
+
+#: Values that look like a vendor and name nobody. These must never form a
+#: bucket: if they did, every record with no vendor would resolve to a single
+#: entity - the largest and most spurious vendor in the corpus.
+VENDOR_NULL_TOKENS: Final[frozenset[str]] = frozenset({
+    "", "-", "--", "na", "n/a", "nan", "none", "null", "nil", "unknown",
+    "not available", "not applicable", "others", "other", "various",
+    "misc", "miscellaneous", "self", "departmental",
+})
+
+#: Shortest string that can be a real firm name after normalisation.
+VENDOR_MIN_NAME_LENGTH: Final[int] = 3
+
+#: Fuzzy vendor matching threshold. Set high on purpose: "Kumar" and "Kumari"
+#: are one character apart and are different companies, so a loose rule would
+#: merge much of a district. Fuzzy matches are reported at MEDIUM confidence
+#: and never at HIGH.
+VENDOR_FUZZY_SIMILARITY: Final[float] = 0.92
+
+#: Flag Stage 6.5 receives when a record's entity group contradicts itself.
+#: Additive only - it never removes an escalation or overrides a decision.
+ENTITY_RESOLUTION_FLAG: Final[str] = "requires_entity_resolution"

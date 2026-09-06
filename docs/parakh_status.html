@@ -328,9 +328,10 @@ footer {
   </header>
 
   <p class="lede">
-    Two models are training on Kaggle right now. Neither of them detects fraud,
-    and that is not a bug in the models — it is the state of the data. This page
-    says what is running, what changed, and precisely what is missing.
+    For the first time this project has real fraud labels — 73 prosecuted
+    bid-rigging cartels. They are European, not Indian, and that distinction
+    decides what we may claim. This page says what is running, what we now
+    know, and precisely what is still missing.
   </p>
 
   <section>
@@ -339,16 +340,28 @@ footer {
 
       <div class="run">
         <div class="run-top">
-          <span class="run-name">parakh-encoder-bench</span>
+          <span class="run-name">parakh-cartel-screen</span>
           <span class="pulse">RUNNING</span>
         </div>
         <dl>
-          <dt>asks</dt><dd>Which multilingual encoder actually knows that <em>sadak</em> = <em>road</em>?</dd>
-          <dt>method</dt><dd>Probes 10 open-weight encoders (MuRIL, IndicBERT, XLM-R, LaBSE…) on synonym pairs vs. unrelated controls</dd>
-          <dt>gate</dt><dd>separation &gt; 0.05 or we keep TF-IDF</dd>
-          <dt>runtime</dt><dd>~15 min, GPU</dd>
+          <dt>asks</dt><dd>Do bid-rigging screens actually detect prosecuted collusion?</dd>
+          <dt>data</dt><dd>18,807 bids · 73 cartels · 7 countries · real outcomes</dd>
+          <dt>local result</dt><dd>0.581 &plusmn;0.008 pooled; <strong>0.51&ndash;0.74</strong> on an unseen country</dd>
+          <dt>runtime</dt><dd>~20 min, CPU</dd>
         </dl>
-        <a href="https://www.kaggle.com/code/farhadastrodent/parakh-encoder-bench">View on Kaggle →</a>
+        <a href="https://www.kaggle.com/code/farhadastrodent/parakh-cartel-screen">View on Kaggle &rarr;</a>
+      </div>
+
+      <div class="run" style="border-left-color: var(--blocked)">
+        <div class="run-top">
+          <span class="run-name">parakh-encoder-bench</span>
+          <span class="pill p-blocked">BLOCKED</span>
+        </div>
+        <dl>
+          <dt>needs</dt><dd>Kaggle <strong>phone verification</strong>. The kernel is denied DNS even with <code>enable_internet: true</code>, so all 10 encoders fail to download.</dd>
+          <dt>fix</dt><dd>kaggle.com/settings &rarr; Phone Verification. Two minutes, unblocks permanently.</dd>
+        </dl>
+        <a href="https://www.kaggle.com/code/farhadastrodent/parakh-encoder-bench">View on Kaggle &rarr;</a>
       </div>
 
       <div class="run" style="border-left-color: var(--gated)">
@@ -374,7 +387,49 @@ footer {
   </section>
 
   <section>
-    <h2>The most important thing that happened today</h2>
+    <h2>The first real fraud labels this project has ever had</h2>
+    <div class="catch">
+      <h3>73 prosecuted cartels, 7 countries, 8,045 confirmed positives</h3>
+      <p>
+        Every earlier PARAKH model trained on a stand-in &mdash; masked fields,
+        injected data-quality defects, synthetic corpora &mdash; because no
+        fraud label existed. This dataset has outcomes decided by national
+        competition authorities.
+      </p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Model</th><th>Grouped CV (by cartel)</th><th>PR-AUC</th></tr></thead>
+          <tbody>
+            <tr><td>gradient boosting</td><td class="num"><strong>0.581 &plusmn;0.008</strong></td><td class="num">0.482</td></tr>
+            <tr><td>MLP</td><td class="num">0.566 &plusmn;0.008</td><td class="num">0.476</td></tr>
+            <tr><td>logistic regression</td><td class="num">0.520 &plusmn;0.008</td><td class="num">0.435</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        <strong>The neural net lost again</strong> &mdash; third time running.
+        The baseline wins and is the one we can explain.
+      </p>
+      <h3 style="margin-top:8px">The number that matters for India</h3>
+      <p>
+        Train on six countries, test on a seventh never seen. That is the
+        closest available proxy for whether any of this works here:
+      </p>
+      <div class="proof">BG 0.73   LV 0.74   SE 0.63   HU 0.63
+PT 0.58   FR 0.57   ES 0.51  &lt;- worse than chance, largest holdout
+
+pooled 0.581     unseen country 0.51-0.74</div>
+      <p>
+        <strong>These screens do not transfer reliably between jurisdictions.</strong>
+        The mechanism travels; the calibration does not. Any screen used in
+        India needs its thresholds refitted on Indian data. That is now
+        measured rather than assumed.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>A bug that produced a working-looking result</h2>
     <div class="catch">
       <h3>Three of our five legal citations were wrong. The gate caught them.</h3>
       <p>
@@ -479,10 +534,16 @@ footer {
             <td class="num">&mdash;</td>
           </tr>
           <tr>
+            <td><strong>Cartel screen</strong><br><span class="dim">supervised, real outcomes</span></td>
+            <td><span class="pill p-live">TRAINED</span></td>
+            <td class="num">0.581 &plusmn;0.008 pooled<br><span class="dim">0.51&ndash;0.74 unseen country</span></td>
+            <td class="num">&mdash;</td>
+          </tr>
+          <tr>
             <td><strong>Fraud typologies</strong><br><span class="dim">bid rotation, cover bidding…</span></td>
-            <td><span class="pill p-blocked">2 of 5 REACHABLE</span></td>
-            <td>Three need a bid table that does not exist in any dataset we hold.</td>
-            <td class="num">—</td>
+            <td><span class="pill p-live">5 of 5 REACHABLE</span></td>
+            <td>Unblocked. ProZorro (240k bids) and the cartel set both carry a real bid table.</td>
+            <td class="num">&mdash;</td>
           </tr>
           <tr>
             <td><strong>Risk calibration</strong><br><span class="dim">score → probability</span></td>
@@ -518,16 +579,24 @@ state intersection {NAGALAND}  → one state
 work-level match   impossible — no dataset carries a work ID</div>
       </div>
 
-      <div class="blocker">
-        <h3>Bid-rigging is invisible — we have never modelled a competition</h3>
-        <span class="pill p-blocked">HARD BLOCK</span>
+      <div class="blocker" style="border-left-color: var(--live)">
+        <h3>Bid data — SOLVED</h3>
+        <span class="pill p-live">RESOLVED</span>
         <p>
-          Bid rotation, cover bidding and single-bidder concentration all need to
-          know who <em>else</em> bid. No dataset we hold has a bid table, and the
-          corpus schema has no concept of a tender.
+          This was a hard block this morning. Two open datasets now supply the
+          bid table PARAKH's schema never had, so all five typologies are
+          reachable.
         </p>
-        <div class="proof">missing everywhere   tender_id · bid_amount · is_winner · n_bidders
-consequence          3 of 5 typologies unreachable, at any model size</div>
+        <div class="proof">ProZorro Ukraine   240,000 bids, 2022-2025, CC-BY
+                   single-bidder share 50.8%
+                   25% of losing bids within 0.04% of the winner
+
+EU cartel set      3.86M bids, 73 prosecuted cartels, CC-BY-NC
+                   18,807 with a confirmed outcome
+
+still missing      an INDIAN bid table. OECD guidance advises buyers not
+                   to publish losing bids, so an Indian public register
+                   is unlikely to ever carry one.</div>
       </div>
 
       <div class="blocker">
